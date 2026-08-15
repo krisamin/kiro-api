@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 import { parseToolInput, ResponseBuilder } from "./anthropic/response.ts";
+import { streamResponse } from "./anthropic/stream.ts";
 import type { MessagesRequest } from "./anthropic/type.ts";
+import { MAX_PAYLOAD_BYTES } from "./core/config.ts";
 import { auth } from "./kiro/auth.ts";
 import { invoke } from "./kiro/client.ts";
 import { convertTools, normalizeMessages, sanitizeSchema } from "./kiro/convert.ts";
@@ -142,6 +144,26 @@ const orphan = buildPayload(
 );
 check("orphan tool result does not crash assembly", typeof orphan === "object");
 
+// Trimming measures each entry once and decrements a running total instead of
+// re-serializing the whole payload per iteration. Guard both halves of that:
+// the result must still fit the ceiling, and it must stay cheap on long
+// conversations (the O(n^2) version took ~1.3s for this shape).
+const longMessages: MessagesRequest["messages"] = [];
+for (let i = 0; i < 4000; i++) {
+  longMessages.push({ role: i % 2 === 0 ? "user" : "assistant", content: `${i} ${"x".repeat(300)}` });
+}
+longMessages.push({ role: "user", content: "final" });
+
+const trimStarted = performance.now();
+const trimmed = buildPayload({ model: "m", messages: longMessages }, "m", undefined, "conv-3");
+const trimElapsed = performance.now() - trimStarted;
+const trimmedBytes = Buffer.byteLength(JSON.stringify(trimmed), "utf8");
+const trimmedHistory = trimmed.conversationState.history ?? [];
+
+check("oversized history trimmed under the ceiling", trimmedBytes <= MAX_PAYLOAD_BYTES, `${trimmedBytes} bytes`);
+check("trimmed history still starts on a user turn", "userInputMessage" in (trimmedHistory[0] ?? {}));
+check("trim stays linear on long conversations", trimElapsed < 250, `took ${Math.round(trimElapsed)}ms`);
+
 console.log("\n=== event-stream decoder ===");
 const frame = (eventType: string, payloadText: string): Uint8Array => {
   const enc = new TextEncoder();
@@ -258,6 +280,101 @@ eq("text chunks concatenated", blocks[0], { type: "text", text: "Hello" });
 eq("split tool json reassembled", (blocks[1] as { input: unknown }).input, { city: "Seoul" });
 eq("stop reason maps to tool_use", builder.response("m", "prompt").stop_reason, "tool_use");
 eq("malformed tool json degrades to empty object", parseToolInput('{"broken'), {});
+
+console.log("\n=== SSE stream contract ===");
+// The streaming path builds its own event sequence, and clients depend on that
+// exact order. Drive it end-to-end against a local server and assert the frames
+// rather than trusting the buffered path to speak for it.
+const sseServer = Bun.serve({
+  port: 0,
+  fetch() {
+    const events: Uint8Array[] = [
+      frame("assistantResponseEvent", '{"content":"Hel"}'),
+      frame("assistantResponseEvent", '{"content":"lo"}'),
+      frame("toolUseEvent", '{"toolUseId":"t1","name":"get","input":"{\\"ci"}'),
+      frame("toolUseEvent", '{"toolUseId":"t1","name":"get","input":"ty\\":\\"Seoul\\"}"}'),
+      frame("toolUseEvent", '{"toolUseId":"t1","name":"get","stop":true}'),
+      // A second tool that never sends `stop`, followed by text. Kiro does this
+      // when a tool call is cut short; the switch itself must close the block,
+      // otherwise two blocks end up open at once.
+      frame("toolUseEvent", '{"toolUseId":"t2","name":"put","input":"{}"}'),
+      // Trailing text after the tool: leaves a block open at the end, so a
+      // missing final closeOpen() shows up as an unbalanced start/stop count.
+      frame("assistantResponseEvent", '{"content":"!"}'),
+      frame("messageMetadataEvent", '{"stopReason":"TOOL_USE"}'),
+    ];
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) controller.enqueue(event);
+          controller.close();
+        },
+      }),
+      { headers: { "content-type": "application/vnd.amazon.eventstream" } },
+    );
+  },
+});
+
+const sseHost = auth.apiHost;
+const sseToken = auth.token;
+try {
+  Object.defineProperty(auth, "apiHost", { value: `http://127.0.0.1:${sseServer.port}`, writable: true });
+  auth.token = async () => "selftest-token";
+
+  const response = streamResponse({} as never, "claude-sonnet-4.5", "prompt", new AbortController().signal);
+  const raw = await response.text();
+  const names = [...raw.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
+  const payloads = [...raw.matchAll(/^data: (.+)$/gm)].map((m) => JSON.parse(m[1] as string));
+
+  eq("sse opens with message_start", names[0], "message_start");
+  eq("sse ends with message_stop", names[names.length - 1], "message_stop");
+  check(
+    "content blocks are balanced",
+    names.filter((n) => n === "content_block_start").length === names.filter((n) => n === "content_block_stop").length,
+    names.join(","),
+  );
+  // Balance alone is not enough: a missing close on a block *switch* can still
+  // leave the counts equal. Anthropic requires strict nesting, so walk the
+  // sequence and reject a second start while one is already open.
+  let depth = 0;
+  let nestingOk = true;
+  for (const name of names) {
+    if (name === "content_block_start") {
+      if (depth !== 0) nestingOk = false;
+      depth++;
+    } else if (name === "content_block_stop") {
+      depth--;
+      if (depth < 0) nestingOk = false;
+    }
+  }
+  check("content blocks never overlap", nestingOk && depth === 0, names.join(","));
+  check(
+    "block indices are monotonic",
+    payloads.filter((p) => p.type === "content_block_start").every((p, i) => p.index === i),
+    names.join(","),
+  );
+  const textDeltas = payloads
+    .filter((p) => p.delta?.type === "text_delta")
+    .map((p) => p.delta.text)
+    .join("");
+  eq("text deltas reassemble to the full answer", textDeltas, "Hello!");
+  // t1's fragments plus t2's complete `{}`; parse only t1's share by taking
+  // everything before the second tool's block.
+  const t1Json = payloads
+    .filter((p) => p.delta?.type === "input_json_delta" && p.index === 1)
+    .map((p) => p.delta.partial_json)
+    .join("");
+  eq("tool json deltas reassemble", parseToolInput(t1Json), { city: "Seoul" });
+  const delta = payloads.find((p) => p.type === "message_delta");
+  eq("stream reports tool_use stop reason", delta?.delta?.stop_reason, "tool_use");
+  check("stream reports usage", (delta?.usage?.output_tokens ?? 0) > 0);
+} catch (error) {
+  check("sse stream contract", false, error instanceof Error ? error.message : String(error));
+} finally {
+  Object.defineProperty(auth, "apiHost", { value: sseHost, writable: true });
+  auth.token = sseToken;
+  sseServer.stop(true);
+}
 
 if (Bun.env.KIRO_SELFTEST_LIVE !== "0") {
   console.log("\n=== live round trip ===");

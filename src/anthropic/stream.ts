@@ -33,7 +33,10 @@ export const streamResponse = (
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const toolJson = new Map<string, string>();
+      // Only the tool *count* feeds the usage estimate; the streamed JSON is
+      // already forwarded to the client as input_json_delta and never re-read
+      // here, so accumulating it would just hold large strings for nothing.
+      const toolIds = new Set<string>();
       let open: OpenBlock;
       let nextIndex = 0;
       let outputText = "";
@@ -104,7 +107,7 @@ export const streamResponse = (
             if (!(open?.kind === "tool" && open.id === toolUseId)) {
               closeOpen();
               open = { kind: "tool", index: nextIndex++, id: toolUseId };
-              toolJson.set(toolUseId, "");
+              toolIds.add(toolUseId);
               controller.enqueue(
                 sse("content_block_start", {
                   type: "content_block_start",
@@ -115,7 +118,6 @@ export const streamResponse = (
             }
 
             if (input) {
-              toolJson.set(toolUseId, (toolJson.get(toolUseId) ?? "") + input);
               controller.enqueue(
                 sse("content_block_delta", {
                   type: "content_block_delta",
@@ -135,7 +137,7 @@ export const streamResponse = (
 
         closeOpen();
 
-        const outputTokens = estimateTokens(outputText) + toolJson.size * 8;
+        const outputTokens = estimateTokens(outputText) + toolIds.size * 8;
         controller.enqueue(
           sse("message_delta", {
             type: "message_delta",

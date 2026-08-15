@@ -60,27 +60,47 @@ const repairOrphanToolResults = (history: KiroHistoryEntry[]): void => {
   }
 };
 
-/** Drop the oldest turns until the serialized payload fits Kiro's size ceiling. */
+/**
+ * Drop the oldest turns until the serialized payload fits Kiro's size ceiling.
+ *
+ * Each entry is measured once and the running total is decremented as entries
+ * are dropped, rather than re-serializing the whole payload per iteration
+ * (which is O(n^2) and cost ~1s on a 4000-turn conversation). The envelope is
+ * derived by subtracting the measured entries from one full measurement, so the
+ * total stays exact rather than estimated.
+ */
 const trimToLimit = (payload: KiroPayload): void => {
   const history = payload.conversationState.history;
   if (!history || history.length === 0) return;
 
-  const before = { entries: history.length, bytes: byteLength(payload) };
+  const beforeEntries = history.length;
+  const totalBefore = byteLength(payload);
 
-  // Remove user/assistant pairs from the front.
-  while (history.length > 2 && byteLength(payload) > MAX_PAYLOAD_BYTES) {
-    history.splice(0, 2);
+  // `,` between array elements is part of the serialized form.
+  const sizes = history.map((entry) => Buffer.byteLength(JSON.stringify(entry), "utf8") + 1);
+  const envelope = totalBefore - sizes.reduce((sum, size) => sum + size, 0);
+
+  let running = totalBefore;
+  let dropped = 0;
+  while (history.length - dropped > 2 && running > MAX_PAYLOAD_BYTES) {
+    running -= (sizes[dropped] as number) + (sizes[dropped + 1] as number);
+    dropped += 2;
   }
   // History must still start on a user turn after trimming.
-  while (history.length > 0 && !(history[0] && "userInputMessage" in history[0])) history.shift();
+  while (dropped < history.length && !(history[dropped] && "userInputMessage" in (history[dropped] as object))) {
+    running -= sizes[dropped] as number;
+    dropped++;
+  }
+  if (dropped > 0) history.splice(0, dropped);
 
   repairOrphanToolResults(history);
 
-  if (history.length === 0) delete payload.conversationState.history;
+  if (history.length === 0) {
+    delete payload.conversationState.history;
+    running = envelope;
+  }
 
-  log.info(
-    `trimmed history: ${before.entries} -> ${history.length} entries (${before.bytes} -> ${byteLength(payload)} bytes)`,
-  );
+  log.info(`trimmed history: ${beforeEntries} -> ${history.length} entries (${totalBefore} -> ${running} bytes)`);
 };
 
 export const buildPayload = (
