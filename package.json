@@ -1,0 +1,24 @@
+{
+  "name": "kiro-api",
+  "version": "0.1.0",
+  "description": "Anthropic-compatible API server backed by Kiro (Amazon Q Developer)",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "kiro-api": "src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src/",
+    "lint:fix": "biome check --write src/",
+    "format": "biome format --write src/",
+    "selftest": "bun run src/selftest.ts"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}
