@@ -4,6 +4,7 @@ import { log } from "../core/log.ts";
 import { convertTools, type NormalMessage, normalizeMessages, systemText } from "./convert.ts";
 import type { KiroHistoryEntry, KiroPayload, KiroUserInputMessage } from "./type.ts";
 
+/** Kiro rejects an empty `content` string anywhere in the conversation. */
 const EMPTY_PLACEHOLDER = "(empty placeholder)";
 
 const byteLength = (payload: KiroPayload): number => Buffer.byteLength(JSON.stringify(payload), "utf8");
@@ -82,14 +83,12 @@ const trimToLimit = (payload: KiroPayload): void => {
   );
 };
 
-export type BuiltPayload = { payload: KiroPayload; modelId: string };
-
 export const buildPayload = (
   request: MessagesRequest,
   modelId: string,
   profileArn: string | undefined,
   conversationId: string,
-): BuiltPayload => {
+): KiroPayload => {
   const { tools, documentation } = convertTools(request.tools);
   const hasTools = tools.length > 0;
 
@@ -154,5 +153,5 @@ export const buildPayload = (
 
   if (byteLength(payload) > MAX_PAYLOAD_BYTES) trimToLimit(payload);
 
-  return { payload, modelId };
+  return payload;
 };

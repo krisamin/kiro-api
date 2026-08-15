@@ -9,6 +9,7 @@ import { invoke, KiroApiError } from "../kiro/client.ts";
 import { systemText, textOf } from "../kiro/convert.ts";
 import { KNOWN_MODELS, normalizeModel } from "../kiro/model.ts";
 import { buildPayload } from "../kiro/payload.ts";
+import type { KiroPayload } from "../kiro/type.ts";
 
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -53,9 +54,9 @@ const handleMessages = async (request: Request): Promise<Response> => {
   const model = normalizeModel(body.model);
   const promptText = promptTextOf(body);
 
-  let payload: ReturnType<typeof buildPayload>["payload"];
+  let payload: KiroPayload;
   try {
-    payload = buildPayload(body, model, auth.profileArn, randomUUID()).payload;
+    payload = buildPayload(body, model, auth.profileArn, randomUUID());
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return json(errorBody("invalid_request_error", message), 400);

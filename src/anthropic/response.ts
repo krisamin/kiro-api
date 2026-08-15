@@ -15,9 +15,6 @@ export type ToolAccumulator = {
   id: string;
   name: string;
   json: string;
-  /** Index of this block in the emitted content array. */
-  index: number;
-  closed: boolean;
 };
 
 export const messageId = (): string => `msg_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
@@ -67,15 +64,14 @@ export class ResponseBuilder {
         break;
       }
       case "toolUse": {
-        const { toolUseId, name, input, stop } = event.data;
+        const { toolUseId, name, input } = event.data;
         let acc = this.tools.get(toolUseId);
         if (!acc) {
-          acc = { id: toolUseId, name, json: "", index: -1, closed: false };
+          acc = { id: toolUseId, name, json: "" };
           this.tools.set(toolUseId, acc);
           this.order.push({ kind: "tool", id: toolUseId });
         }
         if (input) acc.json += input;
-        if (stop) acc.closed = true;
         break;
       }
       case "metadata":

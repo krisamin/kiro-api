@@ -86,11 +86,15 @@ export async function* invoke(payload: KiroPayload, signal?: AbortSignal): Async
 
   const decoder = new EventStreamDecoder();
   const reader = response.body.getReader();
+  let drained = false;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
-      if (done) break;
+      if (done) {
+        drained = true;
+        break;
+      }
       if (!value) continue;
 
       for (const frame of decoder.push(value)) {
@@ -110,6 +114,10 @@ export async function* invoke(payload: KiroPayload, signal?: AbortSignal): Async
     if (decoder.pending > 0) log.warn(`stream ended with ${decoder.pending} trailing bytes`);
   } finally {
     reader.releaseLock();
+    // releaseLock alone leaves the body live — it keeps streaming from the
+    // socket. Any early exit (a thrown frame, a client disconnect running the
+    // generator's return()) must cancel it or the connection leaks.
+    if (!drained) await response.body.cancel().catch(() => {});
   }
 }
 

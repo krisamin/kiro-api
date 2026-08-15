@@ -48,5 +48,3 @@ export const normalizeModel = (model: string): string => {
 
   return name;
 };
-
-export const isKnownModel = (model: string): boolean => KNOWN_MODELS.includes(normalizeModel(model));

@@ -121,15 +121,11 @@ const request: MessagesRequest = {
   ],
 };
 const built = buildPayload(request, "claude-sonnet-4.5", "arn:test", "conv-1");
-const history = built.payload.conversationState.history as KiroHistoryEntry[];
+const history = built.conversationState.history as KiroHistoryEntry[];
 check("system prompt folded into first user turn", JSON.stringify(history[0]).includes("SYSPROMPT"));
-eq(
-  "current message is the last user turn",
-  built.payload.conversationState.currentMessage.userInputMessage.content,
-  "three",
-);
-eq("profileArn attached", built.payload.profileArn, "arn:test");
-check("no empty toolUses array anywhere", !JSON.stringify(built.payload).includes('"toolUses":[]'));
+eq("current message is the last user turn", built.conversationState.currentMessage.userInputMessage.content, "three");
+eq("profileArn attached", built.profileArn, "arn:test");
+check("no empty toolUses array anywhere", !JSON.stringify(built).includes('"toolUses":[]'));
 
 const orphan = buildPayload(
   {
@@ -144,7 +140,7 @@ const orphan = buildPayload(
   undefined,
   "conv-2",
 );
-check("orphan tool result does not crash assembly", typeof orphan.payload === "object");
+check("orphan tool result does not crash assembly", typeof orphan === "object");
 
 console.log("\n=== event-stream decoder ===");
 const frame = (eventType: string, payloadText: string): Uint8Array => {
@@ -192,6 +188,63 @@ try {
 }
 check("corrupted frame rejected by CRC", crcThrew);
 
+// A client that disconnects mid-answer abandons the generator. `releaseLock()`
+// alone leaves the upstream body live and streaming, so the connection leaks
+// until GC. Serve real frames locally and confirm the body is dead afterwards.
+const leakServer = Bun.serve({
+  port: 0,
+  fetch() {
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          await Bun.sleep(20);
+          controller.enqueue(frame("assistantResponseEvent", '{"content":"x"}'));
+        },
+      }),
+      { headers: { "content-type": "application/vnd.amazon.eventstream" } },
+    );
+  },
+});
+
+const realHost = auth.apiHost;
+const realToken = auth.token;
+const realForce = auth.forceRefresh;
+const realFetch = globalThis.fetch;
+let capturedBody: Response | undefined;
+
+try {
+  Object.defineProperty(auth, "apiHost", { value: `http://127.0.0.1:${leakServer.port}`, writable: true });
+  auth.token = async () => "selftest-token";
+  auth.forceRefresh = async () => "selftest-token";
+  globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+    const res = await realFetch(...args);
+    capturedBody = res;
+    return res;
+  }) as typeof fetch;
+
+  let seen = 0;
+  for await (const _event of invoke({} as never)) {
+    seen++;
+    if (seen >= 3) break; // abandon the generator, as a disconnect would
+  }
+  await Bun.sleep(50);
+  globalThis.fetch = realFetch;
+
+  const probe = capturedBody?.body?.getReader();
+  const outcome = probe
+    ? await Promise.race([probe.read().then((r) => (r.done ? "done" : "data")), Bun.sleep(500).then(() => "timeout")])
+    : "no-body";
+  check("abandoned stream cancels the upstream body", outcome !== "data", `got ${outcome}`);
+} catch (error) {
+  check("abandoned stream cancels the upstream body", false, error instanceof Error ? error.message : String(error));
+} finally {
+  globalThis.fetch = realFetch;
+  Object.defineProperty(auth, "apiHost", { value: realHost, writable: true });
+  auth.token = realToken;
+  auth.forceRefresh = realForce;
+  leakServer.stop(true);
+}
+
 console.log("\n=== response assembly ===");
 const builder = new ResponseBuilder();
 builder.accept({ type: "assistantResponse", data: { content: "Hel" } });
@@ -219,7 +272,7 @@ if (Bun.env.KIRO_SELFTEST_LIVE !== "0") {
       "selftest-live",
     );
     const liveBuilder = new ResponseBuilder();
-    for await (const event of invoke(live.payload)) liveBuilder.accept(event);
+    for await (const event of invoke(live)) liveBuilder.accept(event);
     check("live response contains marker", liveBuilder.text.includes("SELFTEST_OK"), liveBuilder.text.slice(0, 80));
     check("metering reported", liveBuilder.credits > 0);
 

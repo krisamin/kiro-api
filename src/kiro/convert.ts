@@ -12,9 +12,6 @@ import type { KiroImage, KiroToolResult, KiroToolSpec, KiroToolUse } from "./typ
  * enforced here rather than discovered at runtime.
  */
 
-/** Kiro rejects an empty `content` string anywhere in the conversation. */
-const EMPTY_PLACEHOLDER = "(empty placeholder)";
-
 export const textOf = (content: string | AnthropicContentBlock[] | undefined): string => {
   if (content === undefined) return "";
   if (typeof content === "string") return content;
@@ -212,22 +209,5 @@ export const normalizeMessages = (messages: AnthropicMessage[], keepTools: boole
   // History must begin with a user turn.
   while (merged.length > 0 && merged[0]?.role !== "user") merged.shift();
 
-  // A tool_result turn must follow an assistant turn that actually issued the
-  // matching tool_use, otherwise Kiro 400s on the orphan.
-  const alternated: NormalMessage[] = [];
-  for (const msg of merged) {
-    const prev = alternated[alternated.length - 1];
-    if (prev && prev.role === msg.role) {
-      alternated.push({
-        role: prev.role === "user" ? "assistant" : "user",
-        text: EMPTY_PLACEHOLDER,
-        images: [],
-        toolUses: [],
-        toolResults: [],
-      });
-    }
-    alternated.push(msg);
-  }
-
-  return alternated;
+  return merged;
 };
