@@ -114,6 +114,43 @@ export class KiroAuth {
     }
   }
 
+  /**
+   * Write a refreshed token back into the kiro-cli database.
+   *
+   * The refresh token rotates on every use, so keeping the new one only in
+   * memory means a restart falls back to a spent token. Writing it back also
+   * lets kiro-cli and this server share one valid grant instead of racing.
+   * Failure here is not fatal — the in-memory token still works for this run.
+   */
+  private persist(cred: Credential): void {
+    try {
+      const db = new Database(KIRO_CLI_DB);
+      try {
+        const row = db.query("SELECT value FROM auth_kv WHERE key = ?").get("kirocli:odic:token") as
+          | { value: string }
+          | undefined;
+        if (!row) return;
+        const record = JSON.parse(row.value) as Record<string, unknown>;
+        const iso = new Date(cred.expiresAt).toISOString();
+
+        // Mirror whichever key style the record already uses.
+        if ("access_token" in record) record.access_token = cred.accessToken;
+        if ("accessToken" in record) record.accessToken = cred.accessToken;
+        if ("refresh_token" in record) record.refresh_token = cred.refreshToken;
+        if ("refreshToken" in record) record.refreshToken = cred.refreshToken;
+        if ("expires_at" in record) record.expires_at = iso;
+        if ("expiresAt" in record) record.expiresAt = iso;
+
+        db.query("UPDATE auth_kv SET value = ? WHERE key = ?").run(JSON.stringify(record), "kirocli:odic:token");
+        log.debug("refreshed token written back to kiro-cli db");
+      } finally {
+        db.close();
+      }
+    } catch (error) {
+      log.warn(`could not persist refreshed token: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   private get current(): Credential {
     if (!this.credential) this.credential = this.load();
     return this.credential;
@@ -185,20 +222,23 @@ export class KiroAuth {
       refreshToken: refreshToken || cred.refreshToken,
       expiresAt: Date.now() + expiresIn * 1000,
     };
+    this.persist(this.credential);
     log.info(`token refreshed, valid for ${Math.round(expiresIn / 60)} min`);
   }
 
   private async refreshViaSsoOidc(
     cred: Credential,
   ): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
+    // CreateToken is a JSON API with camelCase members. Sending the OAuth2
+    // form-encoded shape gets a bare 400 "invalid_request" with no hint.
     const res = await fetch(ssoOidcUrl(cred.ssoRegion), {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        client_id: cred.clientId ?? "",
-        client_secret: cred.clientSecret ?? "",
-        refresh_token: cred.refreshToken,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        grantType: "refresh_token",
+        clientId: cred.clientId ?? "",
+        clientSecret: cred.clientSecret ?? "",
+        refreshToken: cred.refreshToken,
       }),
     });
     if (!res.ok) {

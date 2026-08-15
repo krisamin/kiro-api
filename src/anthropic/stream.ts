@@ -39,6 +39,9 @@ export const streamResponse = (
       let outputText = "";
       let stopReason: string | undefined;
       let sawToolUse = false;
+      const startedAt = performance.now();
+      let firstTextAt = 0;
+      let chunkCount = 0;
 
       const closeOpen = (): void => {
         if (!open) return;
@@ -82,6 +85,8 @@ export const streamResponse = (
               );
             }
             outputText += chunk;
+            if (!firstTextAt) firstTextAt = performance.now();
+            chunkCount++;
             controller.enqueue(
               sse("content_block_delta", {
                 type: "content_block_delta",
@@ -139,6 +144,10 @@ export const streamResponse = (
           }),
         );
         controller.enqueue(sse("message_stop", { type: "message_stop" }));
+        log.info(
+          `stream completed model=${model} ttfb=${Math.round(firstTextAt ? firstTextAt - startedAt : -1)}ms ` +
+            `total=${Math.round(performance.now() - startedAt)}ms chunks=${chunkCount}`,
+        );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         log.error(`stream failed: ${message}`);

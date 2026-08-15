@@ -222,6 +222,13 @@ if (Bun.env.KIRO_SELFTEST_LIVE !== "0") {
     for await (const event of invoke(live.payload)) liveBuilder.accept(event);
     check("live response contains marker", liveBuilder.text.includes("SELFTEST_OK"), liveBuilder.text.slice(0, 80));
     check("metering reported", liveBuilder.credits > 0);
+
+    // Token refresh is the one path that only runs once an hour, so a broken
+    // request shape stays invisible until the token happens to expire mid-use.
+    // Exercise it explicitly against the real endpoint.
+    const fresh = await auth.forceRefresh();
+    check("forced token refresh succeeds", fresh.length > 0);
+    check("refreshed token differs or is valid", auth.load().expiresAt > Date.now());
   } catch (error) {
     check("live round trip", false, error instanceof Error ? error.message : String(error));
   }
