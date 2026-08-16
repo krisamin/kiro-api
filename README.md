@@ -1,12 +1,25 @@
 # kiro-api
 
-An Anthropic-compatible API server in front of Kiro (Amazon Q Developer). I wrote it because I wanted to use my Kiro subscription from tools that only speak the Anthropic Messages API — Hermes, in my case — and the existing proxy I tried was AGPL and did a few things I didn't want to inherit.
+An Anthropic-compatible API server in front of Kiro (Amazon Q Developer).
+
+I wrote it because I wanted to use my Kiro subscription from tools that only speak the Anthropic Messages API — [Hermes](https://github.com/NousResearch/hermes), in my case — and the existing proxy I tried was AGPL and did a few things I didn't want to inherit.
 
 It reads the credentials `kiro-cli login` already wrote, translates Anthropic requests into Kiro's `generateAssistantResponse` format, and translates the streamed response back. Text, tool calls, images, and streaming all work.
 
+```
+Anthropic client  ──POST /v1/messages──▶  kiro-api  ──▶  runtime.us-east-1.kiro.dev
+                  ◀────── SSE ─────────            ◀───   (AWS event stream)
+```
+
+## Requirements
+
+- [Bun](https://bun.sh) 1.2 or newer
+- [`kiro-cli`](https://kiro.dev), logged in
+- A Kiro subscription. This is a protocol adapter, not a way around one — it spends your own quota through your own credentials.
+
 ## Run it
 
-You need to be logged in first:
+Log in first. `kiro-cli` stores the tokens; this server only reads them.
 
 ```bash
 kiro-cli login --license pro \
@@ -31,7 +44,38 @@ curl -s http://127.0.0.1:9101/v1/messages \
        "messages":[{"role":"user","content":"hi"}]}'
 ```
 
-`bun run selftest` exercises the conversion logic and does one live round trip.
+Three endpoints: `POST /v1/messages`, `GET /v1/models`, `GET /health`. The `/v1` prefix is optional.
+
+`bun run selftest` exercises the conversion logic and does one live round trip. Set `KIRO_SELFTEST_LIVE=0` to skip the network part.
+
+### As a service
+
+```ini
+# ~/.config/systemd/user/kiro-api.service
+[Unit]
+Description=kiro-api
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/krisamin/kiro-api
+EnvironmentFile=%h/.config/kiro-api/env
+ExecStart=%h/.bun/bin/bun run src/index.ts
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.local/state/kiro-api.log
+StandardError=append:%h/.local/state/kiro-api.log
+
+[Install]
+WantedBy=default.target
+```
+
+`EnvironmentFile` is a plain `KEY=value` file — put `KIRO_API_KEY` there rather than in the unit, which is world-readable.
+
+```bash
+systemctl --user enable --now kiro-api
+```
 
 ## Configuration
 
@@ -42,7 +86,17 @@ Everything is an environment variable, all optional except the key:
 **KIRO_API_REGION:** inference region, default `us-east-1`. This is separate from your SSO region.
 **KIRO_CLI_DB:** path to the kiro-cli SQLite store, default `~/.local/share/kiro-cli/data.sqlite3`.
 **KIRO_MAX_PAYLOAD_BYTES:** history trim ceiling, default 600000.
+**KIRO_MAX_TOOL_DESCRIPTION:** tool descriptions longer than this move into the system prompt, default 10000.
+**TOKEN_REFRESH_SKEW_SEC:** refresh this many seconds before expiry, default 120.
 **KIRO_LOG_LEVEL:** `debug`, `info`, `warn`, `error`.
+
+## Security
+
+This server holds a key to your Kiro account. Anyone who can reach it can spend your quota.
+
+- **Bind to loopback.** The default is `127.0.0.1` on purpose. If you change `KIRO_API_HOST`, set `KIRO_API_KEY` too — the server logs a warning at startup when the key is unset, and that warning is the only thing standing between an exposed port and an open relay.
+- **Tokens live in kiro-cli's SQLite file**, not here. This server reads that file and writes refreshed tokens back to it (refresh tokens rotate on use, so they have to be persisted). Nothing is copied anywhere else.
+- **Request bodies are not logged.** Logs carry model, timing, chunk counts, and errors.
 
 ## Models
 
@@ -66,6 +120,10 @@ Availability depends on your subscription tier, so a model listed here can still
 
 **One conversation per request.** `conversationId` is generated fresh each time and history is replayed from the request, which is what an Anthropic client expects. Kiro's server-side conversation state is unused.
 
+**A single turn larger than the ceiling can't be trimmed.** History trimming drops whole turns from the oldest end and stops at two entries. If one turn is bigger than `KIRO_MAX_PAYLOAD_BYTES` on its own, there's nothing left to drop and Kiro returns the 400.
+
+**Device registration expires.** `kiro-cli login` again when it does; token refresh handles everything up to that point on its own.
+
 ## Layout
 
 ```
@@ -78,3 +136,7 @@ src/
 ```
 
 The event-stream decoder in `src/kiro/event-stream.ts` parses the real AWS binary framing — length prefixes, header blocks, CRC32 on both the prelude and the message — and buffers partial frames, so a chunk boundary landing mid-frame or a payload containing braces can't desync the stream.
+
+## License
+
+MIT. Not affiliated with, endorsed by, or supported by Amazon or Anthropic.

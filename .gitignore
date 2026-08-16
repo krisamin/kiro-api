@@ -1,6 +1,4 @@
 node_modules/
 .env
 *.log
-bun.lock
-bun.lockb
 .DS_Store

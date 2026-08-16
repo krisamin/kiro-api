@@ -2,6 +2,8 @@
   "name": "kiro-api",
   "version": "0.1.0",
   "description": "Anthropic-compatible API server backed by Kiro (Amazon Q Developer)",
+  "license": "MIT",
+  "author": "krisamin",
   "private": true,
   "type": "module",
   "bin": {
