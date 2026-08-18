@@ -101,9 +101,18 @@ const handleModels = (): Response =>
     })),
   });
 
+/**
+ * Some clients decide the wire protocol from the URL rather than from config:
+ * a base URL ending in `/anthropic` is their signal to speak the native
+ * Messages API. Accept that prefix so `<base>/anthropic` and `<base>` are the
+ * same server.
+ */
+const stripAnthropicPrefix = (path: string): string =>
+  path === "/anthropic" ? "/" : path.replace(/^\/anthropic(?=\/)/, "") || "/";
+
 export const handle = async (request: Request): Promise<Response> => {
   const url = new URL(request.url);
-  const path = url.pathname.replace(/\/+$/, "") || "/";
+  const path = stripAnthropicPrefix(url.pathname.replace(/\/+$/, "") || "/");
 
   if (path === "/health") {
     return json({ status: "ok", profile: auth.profileArn ?? null, host: auth.apiHost });
