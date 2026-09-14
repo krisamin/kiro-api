@@ -52,8 +52,16 @@ export type AnthropicSystem = string | Array<{ type: string; text?: string }>;
  * note that `budget_tokens` is accepted and ignored because clients send it.
  */
 export type AnthropicThinkingConfig = {
-  type: "enabled" | "disabled";
+  /**
+   * `adaptive` is as real as `enabled` and is what recent Claude models take:
+   * ara sends `{ type: "adaptive", display: "summarized" }` for every model
+   * past 4.7 and only falls back to `enabled` with a budget for the older ones.
+   * Matching on `enabled` alone silently ignored the request — thinking was on
+   * everywhere and reached here as nothing at all.
+   */
+  type: "enabled" | "adaptive" | "disabled";
   budget_tokens?: number;
+  display?: string;
 };
 
 export type MessagesRequest = {

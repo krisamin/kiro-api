@@ -5,7 +5,7 @@ import type { MessagesRequest } from "./anthropic/type.ts";
 import { MAX_PAYLOAD_BYTES } from "./core/config.ts";
 import { auth } from "./kiro/auth.ts";
 import { invoke } from "./kiro/client.ts";
-import { convertTools, normalizeMessages, sanitizeSchema } from "./kiro/convert.ts";
+import { convertTools, normalizeMessages, sanitizeSchema, textOf } from "./kiro/convert.ts";
 /**
  * Self-test: pure conversion/parsing logic plus a live round trip.
  *
@@ -16,7 +16,7 @@ import { convertTools, normalizeMessages, sanitizeSchema } from "./kiro/convert.
 import { crc32, EventStreamDecoder } from "./kiro/event-stream.ts";
 import { KNOWN_MODELS, normalizeModel } from "./kiro/model.ts";
 import { buildPayload } from "./kiro/payload.ts";
-import { splitThinking, THINKING_OPEN, ThinkingSplitter, thinkingAsked } from "./kiro/thinking.ts";
+import { splitThinking, THINKING_CLOSE, THINKING_OPEN, ThinkingSplitter, thinkingAsked } from "./kiro/thinking.ts";
 import type { KiroHistoryEntry } from "./kiro/type.ts";
 
 let passed = 0;
@@ -369,6 +369,44 @@ eq("an unclosed block is still reasoning", splitThinking("<thinking>half a thoug
   );
 }
 check("thinking is off unless asked", !thinkingAsked({ model: "m", messages: [] }));
+// Every "on" value is on. ara sends `adaptive` for current Claude models and
+// matching only `enabled` ignored the request entirely.
+check(
+  "adaptive counts as asking",
+  thinkingAsked({ model: "m", messages: [], thinking: { type: "adaptive", display: "summarized" } }),
+);
+check("disabled does not", !thinkingAsked({ model: "m", messages: [], thinking: { type: "disabled" } }));
+eq(
+  "replayed reasoning comes back marked as reasoning",
+  textOf([
+    { type: "thinking", thinking: "weighing it up" },
+    { type: "text", text: "the answer" },
+  ]),
+  `${THINKING_OPEN}weighing it up${THINKING_CLOSE}\nthe answer`,
+);
+
+// A long conversation gets trimmed from the oldest end, and the oldest turn is
+// where the system prompt lives. Losing it left the model with no instructions
+// at all, which reads as the agent forgetting who it is mid-conversation.
+const longSystem = "SYSTEM_MARKER " + "s".repeat(2_000);
+const longMessageList: MessagesRequest["messages"] = [];
+for (let i = 0; i < 400; i++) {
+  longMessageList.push({ role: i % 2 === 0 ? "user" : "assistant", content: `${i} ${"x".repeat(4_000)}` });
+}
+const systemKept = buildPayload(
+  { model: "m", system: longSystem, messages: longMessageList },
+  "m",
+  undefined,
+  "conv-5",
+);
+check("trimming does not take the system prompt with it", JSON.stringify(systemKept).includes("SYSTEM_MARKER"));
+check(
+  "the system prompt is still at the front",
+  JSON.stringify(
+    (systemKept.conversationState.history as KiroHistoryEntry[])[0] ?? systemKept.conversationState.currentMessage,
+  ).includes("SYSTEM_MARKER"),
+);
+check("and it is not duplicated", JSON.stringify(systemKept).split("SYSTEM_MARKER").length - 1 === 1);
 check(
   "the instruction rides in the prompt, not in a parameter",
   buildPayload(

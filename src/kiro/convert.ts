@@ -1,5 +1,6 @@
 import type { AnthropicContentBlock, AnthropicMessage, AnthropicSystem, AnthropicTool } from "../anthropic/type.ts";
 import { MAX_TOOL_DESCRIPTION, MAX_TOOL_NAME } from "../core/config.ts";
+import { THINKING_CLOSE, THINKING_OPEN } from "./thinking.ts";
 import type { KiroImage, KiroToolResult, KiroToolSpec, KiroToolUse } from "./type.ts";
 
 /**
@@ -18,7 +19,13 @@ export const textOf = (content: string | AnthropicContentBlock[] | undefined): s
   const parts: string[] = [];
   for (const block of content) {
     if (block.type === "text") parts.push(block.text);
-    else if (block.type === "thinking" && block.thinking) parts.push(block.thinking);
+    // Replayed reasoning is marked as reasoning. Kiro has no thinking blocks, so
+    // it can only come back as text, and unmarked it read as something the
+    // model had said out loud. The tags are the ones it was asked to write in
+    // the first place (kiro/thinking.ts), so this is the same shape either way.
+    else if (block.type === "thinking" && block.thinking) {
+      parts.push(`${THINKING_OPEN}${block.thinking}${THINKING_CLOSE}`);
+    }
   }
   return parts.join("\n");
 };

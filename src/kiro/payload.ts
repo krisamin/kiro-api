@@ -87,9 +87,9 @@ const repairOrphanToolResults = (history: KiroHistoryEntry[]): void => {
  * derived by subtracting the measured entries from one full measurement, so the
  * total stays exact rather than estimated.
  */
-const trimToLimit = (payload: KiroPayload): void => {
+const trimToLimit = (payload: KiroPayload): boolean => {
   const history = payload.conversationState.history;
-  if (!history || history.length === 0) return;
+  if (!history || history.length === 0) return false;
 
   const beforeEntries = history.length;
   const totalBefore = byteLength(payload);
@@ -119,6 +119,27 @@ const trimToLimit = (payload: KiroPayload): void => {
   }
 
   log.info(`trimmed history: ${beforeEntries} -> ${history.length} entries (${totalBefore} -> ${running} bytes)`);
+  return dropped > 0;
+};
+
+/**
+ * Put the system prompt at the front of the conversation.
+ *
+ * Kiro has no system role, so the prompt lives on the earliest user turn. That
+ * turn is also the first thing trimming throws away, which took the system
+ * prompt with it: a conversation long enough to trim silently lost the agent's
+ * entire instructions, and the answers after that came from a model with no
+ * idea who it was. So this runs again after trimming, onto whatever turn is
+ * earliest now - the current message if history is gone entirely.
+ */
+const attachSystem = (payload: KiroPayload, system: string): void => {
+  const history = payload.conversationState.history ?? [];
+  const firstUser = history.find((entry) => "userInputMessage" in entry);
+  const target =
+    firstUser && "userInputMessage" in firstUser
+      ? firstUser.userInputMessage
+      : payload.conversationState.currentMessage.userInputMessage;
+  target.content = target.content ? `${system}\n\n${target.content}` : system;
 };
 
 export const buildPayload = (
@@ -200,7 +221,11 @@ export const buildPayload = (
     ...(profileArn ? { profileArn } : {}),
   };
 
-  if (byteLength(payload) > MAX_PAYLOAD_BYTES) trimToLimit(payload);
+  // Trimming drops the oldest turns, and the oldest turn is the one holding the
+  // system prompt, so it goes back on whatever turn is earliest afterwards.
+  if (byteLength(payload) > MAX_PAYLOAD_BYTES && trimToLimit(payload) && system) {
+    attachSystem(payload, system);
+  }
 
   return payload;
 };

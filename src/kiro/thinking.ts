@@ -40,8 +40,15 @@ export const THINKING_INSTRUCTION =
   `only what comes after the closing tag, so the answer has to stand on its own without ` +
   `referring back to the reasoning. Never nest the tags and never use them anywhere else.`;
 
-/** Whether this request asked for thinking. */
-export const thinkingAsked = (request: MessagesRequest): boolean => request.thinking?.type === "enabled";
+/**
+ * Whether this request asked for thinking.
+ *
+ * Anything that is not `disabled` is a yes. The field has more than one "on"
+ * value and which one a client sends is about the model generation it thinks it
+ * is talking to, not about whether it wants reasoning.
+ */
+export const thinkingAsked = (request: MessagesRequest): boolean =>
+  request.thinking !== undefined && request.thinking.type !== "disabled";
 
 export type ThinkingPiece = { kind: "text" | "thinking"; text: string };
 
