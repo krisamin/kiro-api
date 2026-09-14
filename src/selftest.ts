@@ -145,6 +145,59 @@ const orphan = buildPayload(
 );
 check("orphan tool result does not crash assembly", typeof orphan === "object");
 
+// A wordless turn stays wordless. Most turns of an agent conversation are a
+// tool call one way and its result the other, and filling those with a
+// placeholder put the placeholder in front of the model often enough that it
+// started writing it into answers.
+const wordless = buildPayload(
+  {
+    model: "m",
+    tools: [{ name: "read_file", description: "d", input_schema: { type: "object" } }],
+    messages: [
+      { role: "user", content: "read it" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read_file", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "alpha" }] },
+    ],
+  },
+  "m",
+  undefined,
+  "conv-3",
+);
+check("no placeholder text is invented anywhere", !JSON.stringify(wordless).includes("placeholder"));
+const wordlessHistory = wordless.conversationState.history as KiroHistoryEntry[];
+const toolTurn = wordlessHistory.find((entry) => "assistantResponseMessage" in entry);
+eq(
+  "an assistant turn that is only a tool call carries no words",
+  toolTurn && "assistantResponseMessage" in toolTurn ? toolTurn.assistantResponseMessage.content : null,
+  "",
+);
+eq(
+  "a current message carrying tool results needs no words either",
+  wordless.conversationState.currentMessage.userInputMessage.content,
+  "",
+);
+
+// The exception, and the reason a placeholder existed at all: Kiro rejects a
+// current message with nothing in it whatsoever, which is what an invented user
+// turn is when the client's last turn was the assistant's.
+const invented = buildPayload(
+  {
+    model: "m",
+    messages: [
+      { role: "user", content: "count" },
+      { role: "assistant", content: "one, two" },
+    ],
+  },
+  "m",
+  undefined,
+  "conv-4",
+);
+eq(
+  "an invented user turn says what it means",
+  invented.conversationState.currentMessage.userInputMessage.content,
+  "Continue.",
+);
+
 // Trimming measures each entry once and decrements a running total instead of
 // re-serializing the whole payload per iteration. Guard both halves of that:
 // the result must still fit the ceiling, and it must stay cheap on long

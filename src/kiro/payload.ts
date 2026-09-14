@@ -5,14 +5,31 @@ import { convertTools, type NormalMessage, normalizeMessages, systemText } from 
 import { THINKING_INSTRUCTION, thinkingAsked } from "./thinking.ts";
 import type { KiroHistoryEntry, KiroPayload, KiroUserInputMessage } from "./type.ts";
 
-/** Kiro rejects an empty `content` string anywhere in the conversation. */
-const EMPTY_PLACEHOLDER = "(empty placeholder)";
+/**
+ * What to say when a turn has no words of its own.
+ *
+ * ★Only the *current* message needs this, and only when it is empty in every
+ * way. Empty `content` was treated as a 400 anywhere in the conversation, so
+ * every wordless turn - which in an agent conversation is most of them, a tool
+ * call one way and its result the other - carried a placeholder into the
+ * prompt. The model reads its own history, and a transcript full of "(empty
+ * placeholder)" eventually gets it written into an answer, which is how this
+ * was noticed.
+ *
+ * Measured: empty `content` is accepted on history entries (assistant and
+ * user), and on the current message when it carries tool results. The one
+ * rejection is a current message with nothing at all - no text, no images, no
+ * tool results - which happens when the client's last turn is the assistant's
+ * and a user turn has to be invented to carry the request. "Continue." is what
+ * that invented turn actually means.
+ */
+const CONTINUE_TEXT = "Continue.";
 
 const byteLength = (payload: KiroPayload): number => Buffer.byteLength(JSON.stringify(payload), "utf8");
 
 const buildUserMessage = (msg: NormalMessage, modelId: string): KiroUserInputMessage => {
   const out: KiroUserInputMessage = {
-    content: msg.text || EMPTY_PLACEHOLDER,
+    content: msg.text,
     modelId,
     origin: "AI_EDITOR",
   };
@@ -141,7 +158,7 @@ export const buildPayload = (
     } else {
       const assistant: KiroHistoryEntry = {
         assistantResponseMessage: {
-          content: msg.text || EMPTY_PLACEHOLDER,
+          content: msg.text,
           // An empty toolUses array is itself a 400; only attach a populated one.
           ...(msg.toolUses.length > 0 ? { toolUses: msg.toolUses } : {}),
         },
@@ -159,12 +176,18 @@ export const buildPayload = (
   if (currentMessage.role === "assistant") {
     history.push({
       assistantResponseMessage: {
-        content: currentMessage.text || EMPTY_PLACEHOLDER,
+        content: currentMessage.text,
         ...(currentMessage.toolUses.length > 0 ? { toolUses: currentMessage.toolUses } : {}),
       },
     });
-    current.content = EMPTY_PLACEHOLDER;
+    current.content = "";
     delete current.images;
+  }
+
+  // The one turn Kiro will not take empty: a current message with nothing
+  // in it at all. Everything else keeps its own silence.
+  if (!current.content && !current.images?.length && !current.userInputMessageContext?.toolResults?.length) {
+    current.content = CONTINUE_TEXT;
   }
 
   const payload: KiroPayload = {

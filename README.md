@@ -145,7 +145,7 @@ The list above reflects a Kiro Pro (Identity Center) account. Availability depen
 
 ## Behaviour worth knowing
 
-**Kiro answers almost every malformed request with the same 400.** "Improperly formed request" covers an empty `required: []` in a tool schema, an `additionalProperties` key anywhere in it, an empty `toolUses` array, a history that does not start with a user turn, two same-role turns in a row, a `tool_result` whose `tool_use` is not in the message right before it, an empty content string, and a payload over roughly 615 KB. `src/kiro/convert.ts` and `src/kiro/payload.ts` exist largely to make those states unreachable, and the selftest asserts each one.
+**Kiro answers almost every malformed request with the same 400.** "Improperly formed request" covers an empty `required: []` in a tool schema, an `additionalProperties` key anywhere in it, an empty `toolUses` array, a history that does not start with a user turn, two same-role turns in a row, a `tool_result` whose `tool_use` is not in the message right before it, a current message with nothing in it at all (no text, no images, no tool results), and a payload over roughly 615 KB. `src/kiro/convert.ts` and `src/kiro/payload.ts` exist largely to make those states unreachable, and the selftest asserts each one.
 
 **Usage numbers are estimates.** Kiro bills in opaque credits and never reports token counts, so `usage` is a rough 4-characters-per-token approximation. Actual credit spend is written to the log for each request.
 
