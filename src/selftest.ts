@@ -16,6 +16,7 @@ import { convertTools, normalizeMessages, sanitizeSchema } from "./kiro/convert.
 import { crc32, EventStreamDecoder } from "./kiro/event-stream.ts";
 import { KNOWN_MODELS, normalizeModel } from "./kiro/model.ts";
 import { buildPayload } from "./kiro/payload.ts";
+import { splitThinking, THINKING_OPEN, ThinkingSplitter, thinkingAsked } from "./kiro/thinking.ts";
 import type { KiroHistoryEntry } from "./kiro/type.ts";
 
 let passed = 0;
@@ -280,6 +281,50 @@ eq("text chunks concatenated", blocks[0], { type: "text", text: "Hello" });
 eq("split tool json reassembled", (blocks[1] as { input: unknown }).input, { city: "Seoul" });
 eq("stop reason maps to tool_use", builder.response("m", "prompt").stop_reason, "tool_use");
 eq("malformed tool json degrades to empty object", parseToolInput('{"broken'), {});
+
+console.log("\n=== thinking split ===");
+// The reasoning arrives inside the answer's own text (kiro/thinking.ts), so the
+// split is the whole feature: a tag straddling two chunks, or a block left
+// open, must not leak tags into what the person reads.
+eq("plain text stays one text piece", splitThinking("just an answer"), [{ kind: "text", text: "just an answer" }]);
+eq("a full block splits in two", splitThinking("<thinking>work</thinking>\n\nanswer"), [
+  { kind: "thinking", text: "work" },
+  { kind: "text", text: "answer" },
+]);
+eq("an unclosed block is still reasoning", splitThinking("<thinking>half a thought"), [
+  { kind: "thinking", text: "half a thought" },
+]);
+{
+  const splitter = new ThinkingSplitter();
+  const pieceList = [
+    ...splitter.push("<thin"),
+    ...splitter.push("king>rea"),
+    ...splitter.push("soning</thin"),
+    ...splitter.push("king>ans"),
+    ...splitter.push("wer"),
+    ...splitter.end(),
+  ];
+  const joined = pieceList.reduce<Record<string, string>>((acc, piece) => {
+    acc[piece.kind] = (acc[piece.kind] ?? "") + piece.text;
+    return acc;
+  }, {});
+  eq("tags split across chunks still parse", joined, { thinking: "reasoning", text: "answer" });
+  check(
+    "no fragment of a tag reaches the client",
+    pieceList.every((piece) => !piece.text.includes("<") && !piece.text.includes(">")),
+    JSON.stringify(pieceList),
+  );
+}
+check("thinking is off unless asked", !thinkingAsked({ model: "m", messages: [] }));
+check(
+  "the instruction rides in the prompt, not in a parameter",
+  buildPayload(
+    { model: "m", messages: [{ role: "user", content: "hi" }], thinking: { type: "enabled" } },
+    "claude-opus-5",
+    undefined,
+    "selftest-thinking",
+  ).conversationState.currentMessage.userInputMessage.content.includes(THINKING_OPEN),
+);
 
 console.log("\n=== SSE stream contract ===");
 // The streaming path builds its own event sequence, and clients depend on that

@@ -1,5 +1,6 @@
 import { log } from "../core/log.ts";
 import { invoke, KiroApiError } from "../kiro/client.ts";
+import { type ThinkingPiece, ThinkingSplitter } from "../kiro/thinking.ts";
 import type { KiroPayload } from "../kiro/type.ts";
 import { estimateTokens, mapStopReason, messageId } from "./response.ts";
 
@@ -14,6 +15,11 @@ import { estimateTokens, mapStopReason, messageId } from "./response.ts";
  *
  * Kiro interleaves text and tool events freely, so an open block is closed
  * before a different block opens; indices stay monotonic.
+ *
+ * With thinking on, one more thing splits: the model writes its reasoning
+ * between tags inside the same text stream, and it becomes thinking blocks here
+ * (kiro/thinking.ts). Nothing about the ordering changes - a thinking block is
+ * just another block, opened and closed like the rest.
  */
 
 const encoder = new TextEncoder();
@@ -21,13 +27,18 @@ const encoder = new TextEncoder();
 const sse = (event: string, data: unknown): Uint8Array =>
   encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
-type OpenBlock = { kind: "text"; index: number } | { kind: "tool"; index: number; id: string } | undefined;
+type OpenBlock =
+  | { kind: "text"; index: number }
+  | { kind: "thinking"; index: number }
+  | { kind: "tool"; index: number; id: string }
+  | undefined;
 
 export const streamResponse = (
   payload: KiroPayload,
   model: string,
   promptText: string,
   signal: AbortSignal,
+  splitThinking = false,
 ): Response => {
   const id = messageId();
 
@@ -37,6 +48,7 @@ export const streamResponse = (
       // already forwarded to the client as input_json_delta and never re-read
       // here, so accumulating it would just hold large strings for nothing.
       const toolIds = new Set<string>();
+      const splitter = splitThinking ? new ThinkingSplitter() : null;
       let open: OpenBlock;
       let nextIndex = 0;
       let outputText = "";
@@ -45,11 +57,49 @@ export const streamResponse = (
       const startedAt = performance.now();
       let firstTextAt = 0;
       let chunkCount = 0;
+      let thoughtChars = 0;
 
       const closeOpen = (): void => {
         if (!open) return;
         controller.enqueue(sse("content_block_stop", { type: "content_block_stop", index: open.index }));
         open = undefined;
+      };
+
+      const startBlock = (kind: "text" | "thinking"): { kind: "text" | "thinking"; index: number } => {
+        closeOpen();
+        const block = { kind, index: nextIndex++ };
+        open = block;
+        controller.enqueue(
+          sse("content_block_start", {
+            type: "content_block_start",
+            index: block.index,
+            content_block: kind === "thinking" ? { type: "thinking", thinking: "" } : { type: "text", text: "" },
+          }),
+        );
+        return block;
+      };
+
+      /** Write reasoning and answer pieces out as their own blocks. */
+      const writePieces = (pieceList: ThinkingPiece[]): void => {
+        for (const piece of pieceList) {
+          const current = open;
+          const block = current && current.kind === piece.kind ? current : startBlock(piece.kind);
+          if (piece.kind === "thinking") {
+            thoughtChars += piece.text.length;
+          } else {
+            outputText += piece.text;
+          }
+          controller.enqueue(
+            sse("content_block_delta", {
+              type: "content_block_delta",
+              index: block.index,
+              delta:
+                piece.kind === "thinking"
+                  ? { type: "thinking_delta", thinking: piece.text }
+                  : { type: "text_delta", text: piece.text },
+            }),
+          );
+        }
       };
 
       try {
@@ -76,33 +126,19 @@ export const streamResponse = (
           if (event.type === "assistantResponse") {
             const chunk = event.data.content ?? "";
             if (!chunk) continue;
-            if (open?.kind !== "text") {
-              closeOpen();
-              open = { kind: "text", index: nextIndex++ };
-              controller.enqueue(
-                sse("content_block_start", {
-                  type: "content_block_start",
-                  index: open.index,
-                  content_block: { type: "text", text: "" },
-                }),
-              );
-            }
-            outputText += chunk;
             if (!firstTextAt) firstTextAt = performance.now();
             chunkCount++;
-            controller.enqueue(
-              sse("content_block_delta", {
-                type: "content_block_delta",
-                index: open.index,
-                delta: { type: "text_delta", text: chunk },
-              }),
-            );
+            writePieces(splitter ? splitter.push(chunk) : [{ kind: "text", text: chunk }]);
             continue;
           }
 
           if (event.type === "toolUse") {
             const { toolUseId, name, input, stop } = event.data;
             sawToolUse = true;
+
+            // Reasoning left open when the model turns to a tool call ends here:
+            // it did end, it just ended without saying so.
+            if (splitter) writePieces(splitter.end());
 
             if (!(open?.kind === "tool" && open.id === toolUseId)) {
               closeOpen();
@@ -135,9 +171,10 @@ export const streamResponse = (
           }
         }
 
+        if (splitter) writePieces(splitter.end());
         closeOpen();
 
-        const outputTokens = estimateTokens(outputText) + toolIds.size * 8;
+        const outputTokens = estimateTokens(outputText) + Math.ceil(thoughtChars / 4) + toolIds.size * 8;
         controller.enqueue(
           sse("message_delta", {
             type: "message_delta",
@@ -148,7 +185,7 @@ export const streamResponse = (
         controller.enqueue(sse("message_stop", { type: "message_stop" }));
         log.info(
           `stream completed model=${model} ttfb=${Math.round(firstTextAt ? firstTextAt - startedAt : -1)}ms ` +
-            `total=${Math.round(performance.now() - startedAt)}ms chunks=${chunkCount}`,
+            `total=${Math.round(performance.now() - startedAt)}ms chunks=${chunkCount} thought=${thoughtChars}`,
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

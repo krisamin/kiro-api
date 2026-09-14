@@ -151,7 +151,7 @@ The list above reflects a Kiro Pro (Identity Center) account. Availability depen
 
 **Prompt caching happens upstream and does not appear in `usage`.** Kiro caches prompt prefixes on its own, and repeating an identical long system prompt measurably lowers the credit charge. `cache_control` markers sent by a client are accepted but dropped during conversion, and no `cache_creation_input_tokens` or `cache_read_input_tokens` fields come back. Cache effects are visible in the logged credit value only.
 
-**No extended thinking.** Kiro's API has no thinking parameter, and none is synthesised from `<thinking>` tags.
+**Extended thinking is asked for in the prompt, not in a parameter.** Kiro's API has no thinking field and emits no reasoning event, so `thinking: { type: "enabled" }` turns into an instruction to wrap reasoning in `<thinking>` tags, and the tags are parsed back into Anthropic `thinking` blocks (`src/kiro/thinking.ts`). The blocks carry no `signature`, because Kiro issues none. Doing it with a tool instead — the way kiro-cli's own experimental thinking works — was tried and abandoned: the model called the tool reliably and then ended its turn with an empty response, measured five ways, while the same continuation with any non-reasoning tool answered normally.
 
 **Everything is streamed internally.** Kiro only streams, so a non-streaming request is a streaming request that gets buffered. There is no latency benefit to `stream: false`.
 

@@ -2,6 +2,7 @@ import type { MessagesRequest } from "../anthropic/type.ts";
 import { MAX_PAYLOAD_BYTES } from "../core/config.ts";
 import { log } from "../core/log.ts";
 import { convertTools, type NormalMessage, normalizeMessages, systemText } from "./convert.ts";
+import { THINKING_INSTRUCTION, thinkingAsked } from "./thinking.ts";
 import type { KiroHistoryEntry, KiroPayload, KiroUserInputMessage } from "./type.ts";
 
 /** Kiro rejects an empty `content` string anywhere in the conversation. */
@@ -114,6 +115,11 @@ export const buildPayload = (
 
   let system = systemText(request.system);
   if (documentation) system = system ? system + documentation : documentation.trim();
+  // Reasoning is asked for here and parsed back out of the answer; the service
+  // has no parameter for it. See kiro/thinking.ts for why it is not a tool.
+  if (thinkingAsked(request)) {
+    system = system ? `${system}\n\n${THINKING_INSTRUCTION}` : THINKING_INSTRUCTION;
+  }
 
   const messages = normalizeMessages(request.messages, hasTools);
   if (messages.length === 0) throw new Error("No messages to send");

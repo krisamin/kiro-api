@@ -43,11 +43,25 @@ export type AnthropicTool = {
 
 export type AnthropicSystem = string | Array<{ type: string; text?: string }>;
 
+/**
+ * Extended thinking, as the Messages API asks for it.
+ *
+ * Kiro has no such parameter: its own client gets visible reasoning by handing
+ * the model a `thinking` tool and rendering what it writes there. So this is a
+ * switch rather than a budget — see `src/kiro/thinking.ts` for the bridge, and
+ * note that `budget_tokens` is accepted and ignored because clients send it.
+ */
+export type AnthropicThinkingConfig = {
+  type: "enabled" | "disabled";
+  budget_tokens?: number;
+};
+
 export type MessagesRequest = {
   model: string;
   messages: AnthropicMessage[];
   system?: AnthropicSystem;
   tools?: AnthropicTool[];
+  thinking?: AnthropicThinkingConfig;
   max_tokens?: number;
   stream?: boolean;
   temperature?: number;

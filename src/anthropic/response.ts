@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { splitThinking as splitThinkingText } from "../kiro/thinking.ts";
 import type { KiroEvent } from "../kiro/type.ts";
 import type { AnthropicContentBlock, AnthropicUsage, MessagesResponse, StopReason } from "./type.ts";
 
@@ -50,6 +51,12 @@ export class ResponseBuilder {
   private stopReason: string | undefined;
   private creditUsage = 0;
   private contextPercent = 0;
+
+  /**
+   * When set, tagged reasoning inside the answer is lifted into thinking
+   * blocks rather than left in the text. See kiro/thinking.ts.
+   */
+  constructor(private readonly splitThinking = false) {}
 
   /** Feed one decoded Kiro event. Returns the accumulator if a tool was touched. */
   accept(event: KiroEvent): void {
@@ -108,7 +115,16 @@ export class ResponseBuilder {
     const out: AnthropicContentBlock[] = [];
     for (const item of this.order) {
       if (item.kind === "text") {
-        if (item.value) out.push({ type: "text", text: item.value });
+        if (!item.value) continue;
+        if (!this.splitThinking) {
+          out.push({ type: "text", text: item.value });
+          continue;
+        }
+        for (const piece of splitThinkingText(item.value)) {
+          out.push(
+            piece.kind === "thinking" ? { type: "thinking", thinking: piece.text } : { type: "text", text: piece.text },
+          );
+        }
       } else {
         const acc = this.tools.get(item.id);
         if (!acc) continue;

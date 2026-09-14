@@ -9,6 +9,7 @@ import { invoke, KiroApiError } from "../kiro/client.ts";
 import { systemText, textOf } from "../kiro/convert.ts";
 import { KNOWN_MODELS, normalizeModel } from "../kiro/model.ts";
 import { buildPayload } from "../kiro/payload.ts";
+import { thinkingAsked } from "../kiro/thinking.ts";
 import type { KiroPayload } from "../kiro/type.ts";
 
 const json = (body: unknown, status = 200): Response =>
@@ -64,12 +65,14 @@ const handleMessages = async (request: Request): Promise<Response> => {
 
   log.info(`/v1/messages model=${model} stream=${body.stream === true} messages=${body.messages.length}`);
 
+  const thinking = thinkingAsked(body);
+
   if (body.stream === true) {
-    return streamResponse(payload, model, promptText, request.signal);
+    return streamResponse(payload, model, promptText, request.signal, thinking);
   }
 
   try {
-    const builder = new ResponseBuilder();
+    const builder = new ResponseBuilder(thinking);
     for await (const event of invoke(payload, request.signal)) builder.accept(event);
     log.info(
       `completed model=${model} credits=${builder.credits.toFixed(4)} context=${builder.contextUsagePercent.toFixed(1)}%`,
