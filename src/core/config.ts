@@ -44,4 +44,17 @@ export const MAX_TOOL_NAME = 64;
 /** Refresh the access token this many seconds before it actually expires. */
 export const TOKEN_REFRESH_SKEW_SEC = 120;
 
+/**
+ * How often to send an SSE `ping` while waiting on Kiro.
+ *
+ * Kiro can take a long time to produce its first event on a large
+ * conversation - measured up to 43s before the first byte, and the model
+ * thinking before a tool call is the usual reason. Anything in between the
+ * client and here that watches for silence will call that a dead connection:
+ * ara's device relay drops a request after 30s of no events, which is exactly
+ * the failure this prevents. A ping is part of the Messages API's own event
+ * set, so a client that does not care can ignore it.
+ */
+export const PING_INTERVAL_MS: number = Number(env("KIRO_PING_INTERVAL_MS", "10000"));
+
 export const LOG_LEVEL: string = env("KIRO_LOG_LEVEL", "info");

@@ -1,3 +1,4 @@
+import { PING_INTERVAL_MS } from "../core/config.ts";
 import { log } from "../core/log.ts";
 import { invoke, KiroApiError } from "../kiro/client.ts";
 import { type ThinkingPiece, ThinkingSplitter } from "../kiro/thinking.ts";
@@ -64,6 +65,22 @@ export const streamResponse = (
         controller.enqueue(sse("content_block_stop", { type: "content_block_stop", index: open.index }));
         open = undefined;
       };
+
+      /*
+       * Keep the connection audibly alive while Kiro thinks.
+       *
+       * Silence and death look identical to anything watching the socket, and
+       * Kiro is legitimately silent for tens of seconds before a tool call on a
+       * long conversation. ara's device relay ends a request after 30s without
+       * an event, which is how this turned into "device response timed out"
+       * mid-answer. The interval is cleared before the stream closes, so a ping
+       * can never be queued onto a closed controller.
+       */
+      let alive = true;
+      const heartbeat = setInterval(() => {
+        if (!alive) return;
+        controller.enqueue(sse("ping", { type: "ping" }));
+      }, PING_INTERVAL_MS);
 
       const startBlock = (kind: "text" | "thinking"): { kind: "text" | "thinking"; index: number } => {
         closeOpen();
@@ -199,6 +216,8 @@ export const streamResponse = (
           }),
         );
       } finally {
+        alive = false;
+        clearInterval(heartbeat);
         controller.close();
       }
     },
