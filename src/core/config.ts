@@ -30,10 +30,24 @@ export const desktopRefreshUrl = (region: string): string =>
   `https://prod.${region}.auth.desktop.kiro.dev/refreshToken`;
 
 /**
- * Kiro rejects payloads larger than roughly 615KB with a misleading
- * "Improperly formed request" error, so we trim history below a safe ceiling.
+ * Kiro refuses a payload past a byte ceiling, so history is trimmed below it.
+ *
+ * Measured 2026-09-15 by bisecting real requests through this proxy with the
+ * trimming disabled: 2,380,000 bytes answered, 2,395,000 came back 400
+ * `Input content length exceeds threshold.` The old comment here said ~615KB
+ * with a different error text, so the service moved at some point and the
+ * ceiling had been costing us four times the room we have.
+ *
+ * It is bytes and not tokens: 2.25MB of ASCII (about 560K tokens) went
+ * through, while 2.4MB of Korean (about 390K) did not. Compressing the body
+ * does not help either — `content-encoding: gzip` is answered with
+ * "Improperly formed request", and the conversation is stateless, so nothing
+ * can be left on the far side between calls.
+ *
+ * 2,000,000 keeps 16% back for the envelope and for the fact that a
+ * conversation grows between the size check and the send.
  */
-export const MAX_PAYLOAD_BYTES: number = Number(env("KIRO_MAX_PAYLOAD_BYTES", "600000"));
+export const MAX_PAYLOAD_BYTES: number = Number(env("KIRO_MAX_PAYLOAD_BYTES", "2000000"));
 
 /** Kiro rejects tool descriptions past this length; longer ones move to the system prompt. */
 export const MAX_TOOL_DESCRIPTION: number = Number(env("KIRO_MAX_TOOL_DESCRIPTION", "10000"));
