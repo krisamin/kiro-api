@@ -32,11 +32,53 @@ const authorized = (request: Request): boolean => {
   return bearer === `Bearer ${PROXY_API_KEY}`;
 };
 
-/** Text used only to estimate input tokens for the usage field. */
-const promptTextOf = (body: MessagesRequest): string => {
-  const parts = [systemText(body.system)];
-  for (const message of body.messages) parts.push(textOf(message.content));
-  return parts.filter(Boolean).join("\n");
+/**
+ * What one picture costs, whatever its bytes say.
+ *
+ * A base64 image is megabytes of characters and about 1,600 tokens, so counting
+ * its characters like text would swamp everything else in the other direction.
+ */
+const IMAGE_TOKEN = 1600;
+
+/**
+ * An estimate of the input tokens, for the `usage` a client reads.
+ *
+ * ★Counts everything the model is actually sent, not just the prose. It used
+ * to run `textOf` over each message, which keeps `text` and `thinking` and
+ * drops `tool_use`, `tool_result` and images — in an agent conversation that
+ * is nearly the whole payload. The reported figure then sat still while the
+ * real one grew: 20,609 tokens for eight calls running while the payload on
+ * the wire reached 7.9MB. Anything downstream that sizes a window from this
+ * (ara's context gauge, its compaction scale) was reading a number that had
+ * stopped moving.
+ *
+ * Tool schemas count too: they are sent on every call and they are not small.
+ */
+export const promptTokenOf = (body: MessagesRequest): number => {
+  let charCount = systemText(body.system).length;
+  let imageCount = 0;
+  for (const message of body.messages) {
+    const content = message.content;
+    if (typeof content === "string") {
+      charCount += content.length;
+      continue;
+    }
+    if (!content) continue;
+    for (const block of content) {
+      if (block.type === "image") {
+        imageCount += 1;
+      } else if (block.type === "tool_use") {
+        charCount += block.name.length + JSON.stringify(block.input ?? {}).length;
+      } else if (block.type === "tool_result") {
+        charCount +=
+          typeof block.content === "string" ? block.content.length : textOf(block.content).length;
+      } else {
+        charCount += textOf([block]).length;
+      }
+    }
+  }
+  if (body.tools?.length) charCount += JSON.stringify(body.tools).length;
+  return Math.max(1, Math.ceil(charCount / 4) + imageCount * IMAGE_TOKEN);
 };
 
 const handleMessages = async (request: Request): Promise<Response> => {
@@ -53,7 +95,7 @@ const handleMessages = async (request: Request): Promise<Response> => {
   }
 
   const model = normalizeModel(body.model);
-  const promptText = promptTextOf(body);
+  const promptToken = promptTokenOf(body);
 
   let payload: KiroPayload;
   try {
@@ -68,7 +110,7 @@ const handleMessages = async (request: Request): Promise<Response> => {
   const thinking = thinkingAsked(body);
 
   if (body.stream === true) {
-    return streamResponse(payload, model, promptText, request.signal, thinking);
+    return streamResponse(payload, model, promptToken, request.signal, thinking);
   }
 
   try {
@@ -77,7 +119,7 @@ const handleMessages = async (request: Request): Promise<Response> => {
     log.info(
       `completed model=${model} credits=${builder.credits.toFixed(4)} context=${builder.contextUsagePercent.toFixed(1)}%`,
     );
-    return json(builder.response(model, promptText));
+    return json(builder.response(model, promptToken));
   } catch (error) {
     if (error instanceof KiroApiError) {
       log.error(`kiro error ${error.status}: ${error.message}`);

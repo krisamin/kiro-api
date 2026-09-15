@@ -134,14 +134,14 @@ export class ResponseBuilder {
     return out;
   }
 
-  usage(promptText: string): AnthropicUsage {
+  usage(promptToken: number): AnthropicUsage {
     return {
-      input_tokens: estimateTokens(promptText),
+      input_tokens: promptToken,
       output_tokens: estimateTokens(this.text) + this.tools.size * 8,
     };
   }
 
-  response(model: string, promptText: string): MessagesResponse {
+  response(model: string, promptToken: number): MessagesResponse {
     return {
       id: messageId(),
       type: "message",
@@ -150,7 +150,7 @@ export class ResponseBuilder {
       content: this.blocks(),
       stop_reason: mapStopReason(this.stopReason, this.sawToolUse),
       stop_sequence: null,
-      usage: this.usage(promptText),
+      usage: this.usage(promptToken),
     };
   }
 }

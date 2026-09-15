@@ -37,7 +37,7 @@ type OpenBlock =
 export const streamResponse = (
   payload: KiroPayload,
   model: string,
-  promptText: string,
+  promptToken: number,
   signal: AbortSignal,
   splitThinking = false,
 ): Response => {
@@ -131,7 +131,7 @@ export const streamResponse = (
               content: [],
               stop_reason: null,
               stop_sequence: null,
-              usage: { input_tokens: estimateTokens(promptText), output_tokens: 0 },
+              usage: { input_tokens: promptToken, output_tokens: 0 },
             },
           }),
         );

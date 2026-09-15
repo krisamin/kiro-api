@@ -18,6 +18,7 @@ import { KNOWN_MODELS, normalizeModel } from "./kiro/model.ts";
 import { buildPayload } from "./kiro/payload.ts";
 import { splitThinking, THINKING_CLOSE, THINKING_OPEN, ThinkingSplitter, thinkingAsked } from "./kiro/thinking.ts";
 import type { KiroHistoryEntry } from "./kiro/type.ts";
+import { promptTokenOf } from "./server/route.ts";
 
 let passed = 0;
 let failed = 0;
@@ -218,6 +219,40 @@ check("oversized history trimmed under the ceiling", trimmedBytes <= MAX_PAYLOAD
 check("trimmed history still starts on a user turn", "userInputMessage" in (trimmedHistory[0] ?? {}));
 check("trim stays linear on long conversations", trimElapsed < 250, `took ${Math.round(trimElapsed)}ms`);
 
+// The reported input size has to follow what is actually sent. An agent turn is
+// mostly tool traffic, and counting only prose left the figure standing still
+// while the payload grew into megabytes.
+const toolHeavy: MessagesRequest = {
+  model: "m",
+  messages: [
+    { role: "user", content: "go" },
+    {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "t1", name: "read", input: { path: "x".repeat(4000) } }],
+    },
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "t1", content: "y".repeat(40000) }],
+    },
+  ],
+};
+const toolToken = promptTokenOf(toolHeavy);
+check("tool traffic counts toward the reported input", toolToken > 10_000, `${toolToken} tokens`);
+check(
+  "a picture costs a picture, not its base64",
+  promptTokenOf({
+    model: "m",
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(400_000) } },
+        ],
+      },
+    ],
+  }) < 3_000,
+);
+
 console.log("\n=== event-stream decoder ===");
 const frame = (eventType: string, payloadText: string): Uint8Array => {
   const enc = new TextEncoder();
@@ -332,7 +367,7 @@ builder.accept({ type: "metadata", data: { stopReason: "TOOL_USE" } });
 const blocks = builder.blocks();
 eq("text chunks concatenated", blocks[0], { type: "text", text: "Hello" });
 eq("split tool json reassembled", (blocks[1] as { input: unknown }).input, { city: "Seoul" });
-eq("stop reason maps to tool_use", builder.response("m", "prompt").stop_reason, "tool_use");
+eq("stop reason maps to tool_use", builder.response("m", 12).stop_reason, "tool_use");
 eq("malformed tool json degrades to empty object", parseToolInput('{"broken'), {});
 
 console.log("\n=== thinking split ===");
@@ -457,7 +492,7 @@ try {
   Object.defineProperty(auth, "apiHost", { value: `http://127.0.0.1:${sseServer.port}`, writable: true });
   auth.token = async () => "selftest-token";
 
-  const response = streamResponse({} as never, "claude-sonnet-4.5", "prompt", new AbortController().signal);
+  const response = streamResponse({} as never, "claude-sonnet-4.5", 12, new AbortController().signal);
   const raw = await response.text();
   const names = [...raw.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
   const payloads = [...raw.matchAll(/^data: (.+)$/gm)].map((m) => JSON.parse(m[1] as string));
