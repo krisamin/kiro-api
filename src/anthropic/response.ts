@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { measuredPromptToken } from "../kiro/fit.ts";
 import { splitThinking as splitThinkingText } from "../kiro/thinking.ts";
 import type { KiroEvent } from "../kiro/type.ts";
 import type { AnthropicContentBlock, AnthropicUsage, MessagesResponse, StopReason } from "./type.ts";
@@ -43,6 +44,21 @@ export const mapStopReason = (kiroReason: string | undefined, sawToolUse: boolea
  * inventing precise-looking numbers.
  */
 export const estimateTokens = (text: string): number => Math.max(1, Math.ceil(text.length / 4));
+
+/**
+ * The prompt's size by Kiro's own count, when the service reported one.
+ *
+ * `contextUsagePercentage` is what the conversation fills once this reply is
+ * in it - measured: a reply of 6,392 characters moved it by about 3,500 tokens
+ * with the same prompt. So the reply is taken back out, using the same output
+ * figure the usage reports, which keeps `input + output` exactly the service's
+ * number however rough the output estimate is. That sum is what a client
+ * sizing its next request against the window needs.
+ */
+export const promptFromContext = (percent: number, outputToken: number): number | undefined => {
+  const total = measuredPromptToken(percent);
+  return total === undefined ? undefined : Math.max(1, total - outputToken);
+};
 
 export class ResponseBuilder {
   private readonly texts: string[] = [];
@@ -135,10 +151,8 @@ export class ResponseBuilder {
   }
 
   usage(promptToken: number): AnthropicUsage {
-    return {
-      input_tokens: promptToken,
-      output_tokens: estimateTokens(this.text) + this.tools.size * 8,
-    };
+    const output = estimateTokens(this.text) + this.tools.size * 8;
+    return { input_tokens: promptFromContext(this.contextPercent, output) ?? promptToken, output_tokens: output };
   }
 
   response(model: string, promptToken: number): MessagesResponse {

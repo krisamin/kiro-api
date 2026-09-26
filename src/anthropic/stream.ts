@@ -1,9 +1,10 @@
 import { PING_INTERVAL_MS } from "../core/config.ts";
 import { log } from "../core/log.ts";
-import { invoke, KiroApiError } from "../kiro/client.ts";
+import { KiroApiError } from "../kiro/client.ts";
+import { invokeFitted, overflowed, overflowMessage } from "../kiro/fit.ts";
 import { type ThinkingPiece, ThinkingSplitter } from "../kiro/thinking.ts";
 import type { KiroPayload } from "../kiro/type.ts";
-import { estimateTokens, mapStopReason, messageId } from "./response.ts";
+import { estimateTokens, mapStopReason, messageId, promptFromContext } from "./response.ts";
 
 /**
  * Anthropic SSE streaming.
@@ -59,6 +60,7 @@ export const streamResponse = (
       let firstTextAt = 0;
       let chunkCount = 0;
       let thoughtChars = 0;
+      let contextPercent = 0;
 
       const closeOpen = (): void => {
         if (!open) return;
@@ -137,7 +139,7 @@ export const streamResponse = (
         );
         controller.enqueue(sse("ping", { type: "ping" }));
 
-        for await (const event of invoke(payload, signal)) {
+        for await (const event of invokeFitted(payload, signal)) {
           if (signal.aborted) break;
 
           if (event.type === "assistantResponse") {
@@ -183,6 +185,11 @@ export const streamResponse = (
             continue;
           }
 
+          if (event.type === "contextUsage") {
+            contextPercent = event.data.contextUsagePercentage ?? contextPercent;
+            continue;
+          }
+
           if (event.type === "metadata" && event.data.stopReason) {
             stopReason = event.data.stopReason;
           }
@@ -196,7 +203,12 @@ export const streamResponse = (
           sse("message_delta", {
             type: "message_delta",
             delta: { stop_reason: mapStopReason(stopReason, sawToolUse), stop_sequence: null },
-            usage: { output_tokens: outputTokens },
+            // The prompt as the service counted it, replacing the estimate
+            // message_start had to give before anything was known.
+            usage: {
+              input_tokens: promptFromContext(contextPercent, outputTokens) ?? promptToken,
+              output_tokens: outputTokens,
+            },
           }),
         );
         controller.enqueue(sse("message_stop", { type: "message_stop" }));
@@ -205,14 +217,25 @@ export const streamResponse = (
             `total=${Math.round(performance.now() - startedAt)}ms chunks=${chunkCount} thought=${thoughtChars}`,
         );
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = overflowed(error)
+          ? overflowMessage(error as KiroApiError)
+          : error instanceof Error
+            ? error.message
+            : String(error);
         log.error(`stream failed: ${message}`);
         // The HTTP status is already 200 by this point, so the failure has to be
         // reported inside the stream where the client will actually see it.
         controller.enqueue(
           sse("error", {
             type: "error",
-            error: { type: error instanceof KiroApiError ? "api_error" : "internal_server_error", message },
+            error: {
+              type: overflowed(error)
+                ? "invalid_request_error"
+                : error instanceof KiroApiError
+                  ? "api_error"
+                  : "internal_server_error",
+              message,
+            },
           }),
         );
       } finally {

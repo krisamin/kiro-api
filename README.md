@@ -85,7 +85,9 @@ All settings are environment variables. Only the API key really needs attention,
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `KIRO_MAX_PAYLOAD_BYTES` | `600000` | Ceiling for the assembled payload. Older turns are dropped until the request fits. |
+| `KIRO_CONTEXT_WINDOW` | `1000000` | The model's window in tokens. Used to turn Kiro's context-usage percentage into `usage.input_tokens`. |
+| `KIRO_MAX_REFIT` | `5` | How many times a request refused for a full window is shrunk (oldest turns dropped, 85% kept each time) and sent again. |
+| `KIRO_MAX_PAYLOAD_BYTES` | `12000000` | Last-resort byte cap applied before sending. The real limit is the token window. |
 | `KIRO_MAX_TOOL_DESCRIPTION` | `10000` | Tool descriptions longer than this are moved into the system prompt. |
 
 ### Running as a service
@@ -145,9 +147,9 @@ The list above reflects a Kiro Pro (Identity Center) account. Availability depen
 
 ## Behaviour worth knowing
 
-**Kiro answers almost every malformed request with the same 400.** "Improperly formed request" covers an empty `required: []` in a tool schema, an `additionalProperties` key anywhere in it, an empty `toolUses` array, a history that does not start with a user turn, two same-role turns in a row, a `tool_result` whose `tool_use` is not in the message right before it, a current message with nothing in it at all (no text, no images, no tool results), and a payload over roughly 615 KB. `src/kiro/convert.ts` and `src/kiro/payload.ts` exist largely to make those states unreachable, and the selftest asserts each one.
+**Kiro answers almost every malformed request with the same 400.** "Improperly formed request" covers an empty `required: []` in a tool schema, an `additionalProperties` key anywhere in it, an empty `toolUses` array, a history that does not start with a user turn, two same-role turns in a row, a `tool_result` whose `tool_use` is not in the message right before it, a current message with nothing in it at all (no text, no images, no tool results). `src/kiro/convert.ts` and `src/kiro/payload.ts` exist largely to make those states unreachable, and the selftest asserts each one.
 
-**Usage numbers are estimates.** Kiro bills in opaque credits and never reports token counts, so `usage` is a rough 4-characters-per-token approximation. Actual credit spend is written to the log for each request.
+**The window is 1M tokens, and `input_tokens` is Kiro's own count.** Kiro reports `contextUsagePercentage` against exactly 1,000,000 tokens (checked against Anthropic's count_tokens), and `Input content length exceeds threshold.` is that reaching 100%, not a byte ceiling: real code went through at 2.55MB. The closing `message_delta` carries the measured prompt (the percentage less the reply); `message_start` still has to give a 4-characters-per-token estimate because nothing is known yet. `output_tokens` stays an estimate. Actual credit spend is written to the log for each request.
 
 **Prompt caching happens upstream and does not appear in `usage`.** Kiro caches prompt prefixes on its own, and repeating an identical long system prompt measurably lowers the credit charge. `cache_control` markers sent by a client are accepted but dropped during conversion, and no `cache_creation_input_tokens` or `cache_read_input_tokens` fields come back. Cache effects are visible in the logged credit value only.
 
@@ -159,7 +161,7 @@ The list above reflects a Kiro Pro (Identity Center) account. Availability depen
 
 **One conversation per request.** `conversationId` is generated fresh each time and history is replayed from the request, which is what an Anthropic client expects. Kiro's server-side conversation state goes unused.
 
-**A single oversized turn cannot be trimmed.** Trimming drops whole turns from the oldest end and stops at two entries. If one turn exceeds `KIRO_MAX_PAYLOAD_BYTES` by itself there is nothing left to drop, and Kiro returns the 400.
+**Over-window requests are refitted, not rejected.** A request refused for a full window has its oldest turns dropped and is sent again (the system prompt moves to the new earliest turn). A single turn larger than the window cannot be cut, and then the error reaches the client as `prompt is too long: …` so Anthropic clients recognise it.
 
 **Device registration expires.** Run `kiro-cli login` again when that happens. Token refresh handles everything up to that point on its own.
 

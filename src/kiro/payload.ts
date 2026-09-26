@@ -79,7 +79,7 @@ const repairOrphanToolResults = (history: KiroHistoryEntry[]): void => {
 };
 
 /**
- * Drop the oldest turns until the serialized payload fits Kiro's size ceiling.
+ * Drop the oldest turns until the serialized payload is at most `limit` bytes.
  *
  * Each entry is measured once and the running total is decremented as entries
  * are dropped, rather than re-serializing the whole payload per iteration
@@ -87,7 +87,7 @@ const repairOrphanToolResults = (history: KiroHistoryEntry[]): void => {
  * derived by subtracting the measured entries from one full measurement, so the
  * total stays exact rather than estimated.
  */
-const trimToLimit = (payload: KiroPayload): boolean => {
+const trimToLimit = (payload: KiroPayload, limit: number): boolean => {
   const history = payload.conversationState.history;
   if (!history || history.length === 0) return false;
 
@@ -100,7 +100,7 @@ const trimToLimit = (payload: KiroPayload): boolean => {
 
   let running = totalBefore;
   let dropped = 0;
-  while (history.length - dropped > 2 && running > MAX_PAYLOAD_BYTES) {
+  while (history.length - dropped > 2 && running > limit) {
     running -= (sizes[dropped] as number) + (sizes[dropped + 1] as number);
     dropped += 2;
   }
@@ -140,6 +140,29 @@ const attachSystem = (payload: KiroPayload, system: string): void => {
       ? firstUser.userInputMessage
       : payload.conversationState.currentMessage.userInputMessage;
   target.content = target.content ? `${system}\n\n${target.content}` : system;
+};
+
+/**
+ * The system prompt each payload was built with, for putting it back after a
+ * later trim. Kept beside the payload rather than on it so the wire shape stays
+ * exactly what Kiro takes.
+ */
+const systemOf = new WeakMap<KiroPayload, string>();
+
+/**
+ * Cut the oldest turns so the payload keeps `ratio` of its bytes.
+ *
+ * Used after Kiro refuses a request for filling the window. Bytes are only a
+ * proxy for tokens here, which is why the caller shrinks and asks again rather
+ * than computing one exact cut. Returns false when there was no history left
+ * to give up, so the caller stops instead of sending the same thing again.
+ */
+export const shrinkPayload = (payload: KiroPayload, ratio: number): boolean => {
+  const target = Math.floor(byteLength(payload) * ratio);
+  if (!trimToLimit(payload, target)) return false;
+  const system = systemOf.get(payload);
+  if (system) attachSystem(payload, system);
+  return true;
 };
 
 export const buildPayload = (
@@ -223,9 +246,10 @@ export const buildPayload = (
 
   // Trimming drops the oldest turns, and the oldest turn is the one holding the
   // system prompt, so it goes back on whatever turn is earliest afterwards.
-  if (byteLength(payload) > MAX_PAYLOAD_BYTES && trimToLimit(payload) && system) {
+  if (byteLength(payload) > MAX_PAYLOAD_BYTES && trimToLimit(payload, MAX_PAYLOAD_BYTES) && system) {
     attachSystem(payload, system);
   }
+  if (system) systemOf.set(payload, system);
 
   return payload;
 };

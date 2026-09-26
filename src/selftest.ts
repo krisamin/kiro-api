@@ -1,10 +1,9 @@
 #!/usr/bin/env bun
-import { parseToolInput, ResponseBuilder } from "./anthropic/response.ts";
+import { parseToolInput, promptFromContext, ResponseBuilder } from "./anthropic/response.ts";
 import { streamResponse } from "./anthropic/stream.ts";
 import type { MessagesRequest } from "./anthropic/type.ts";
-import { MAX_PAYLOAD_BYTES } from "./core/config.ts";
 import { auth } from "./kiro/auth.ts";
-import { invoke } from "./kiro/client.ts";
+import { invoke, KiroApiError } from "./kiro/client.ts";
 import { convertTools, normalizeMessages, sanitizeSchema, textOf } from "./kiro/convert.ts";
 /**
  * Self-test: pure conversion/parsing logic plus a live round trip.
@@ -14,8 +13,9 @@ import { convertTools, normalizeMessages, sanitizeSchema, textOf } from "./kiro/
  * Kiro's structural rules).
  */
 import { crc32, EventStreamDecoder } from "./kiro/event-stream.ts";
+import { overflowed, overflowMessage } from "./kiro/fit.ts";
 import { KNOWN_MODELS, normalizeModel } from "./kiro/model.ts";
-import { buildPayload } from "./kiro/payload.ts";
+import { buildPayload, shrinkPayload } from "./kiro/payload.ts";
 import { splitThinking, THINKING_CLOSE, THINKING_OPEN, ThinkingSplitter, thinkingAsked } from "./kiro/thinking.ts";
 import type { KiroHistoryEntry } from "./kiro/type.ts";
 import { promptTokenOf } from "./server/route.ts";
@@ -199,9 +199,9 @@ eq(
   "Continue.",
 );
 
-// Trimming measures each entry once and decrements a running total instead of
+// Shrinking measures each entry once and decrements a running total instead of
 // re-serializing the whole payload per iteration. Guard both halves of that:
-// the result must still fit the ceiling, and it must stay cheap on long
+// the result must come in under the target, and it must stay cheap on long
 // conversations (the O(n^2) version took ~1.3s for this shape).
 const longMessages: MessagesRequest["messages"] = [];
 for (let i = 0; i < 4000; i++) {
@@ -209,13 +209,21 @@ for (let i = 0; i < 4000; i++) {
 }
 longMessages.push({ role: "user", content: "final" });
 
-const trimStarted = performance.now();
 const trimmed = buildPayload({ model: "m", messages: longMessages }, "m", undefined, "conv-3");
+const untrimmedBytes = Buffer.byteLength(JSON.stringify(trimmed), "utf8");
+check("a long conversation under the window is sent whole", (trimmed.conversationState.history ?? []).length === 4000);
+const trimStarted = performance.now();
+const shrank = shrinkPayload(trimmed, 0.5);
 const trimElapsed = performance.now() - trimStarted;
 const trimmedBytes = Buffer.byteLength(JSON.stringify(trimmed), "utf8");
 const trimmedHistory = trimmed.conversationState.history ?? [];
 
-check("oversized history trimmed under the ceiling", trimmedBytes <= MAX_PAYLOAD_BYTES, `${trimmedBytes} bytes`);
+check("shrink reports that it cut", shrank);
+check(
+  "shrink keeps at most the asked share",
+  trimmedBytes <= untrimmedBytes * 0.5 && trimmedBytes > untrimmedBytes * 0.45,
+  `${trimmedBytes} of ${untrimmedBytes} bytes`,
+);
 check("trimmed history still starts on a user turn", "userInputMessage" in (trimmedHistory[0] ?? {}));
 check("trim stays linear on long conversations", trimElapsed < 250, `took ${Math.round(trimElapsed)}ms`);
 
@@ -245,9 +253,7 @@ check(
     messages: [
       {
         role: "user",
-        content: [
-          { type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(400_000) } },
-        ],
+        content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "A".repeat(400_000) } }],
       },
     ],
   }) < 3_000,
@@ -420,6 +426,25 @@ eq(
   `${THINKING_OPEN}weighing it up${THINKING_CLOSE}\nthe answer`,
 );
 
+// Usage comes from the service's own count. The percentage covers the reply as
+// well, so the reply is taken back out and the two still add up to it.
+eq("prompt from context: 39.3485% of 1M less the reply", promptFromContext(39.3485, 500), 393485 - 500);
+eq("prompt from context: no report falls back", promptFromContext(0, 10), undefined);
+eq("prompt from context: never below one", promptFromContext(0.0001, 50), 1);
+
+// Kiro's refusal for a full window, and how it is passed on.
+const fullWindow = new KiroApiError("Input content length exceeds threshold.", 400, "{}");
+check("a full window is recognised", overflowed(fullWindow));
+check(
+  "other 400s are not taken for a full window",
+  !overflowed(new KiroApiError("Improperly formed request.", 400, "{}")),
+);
+check(
+  "the refusal reads as prompt is too long",
+  /prompt is too long/.test(overflowMessage(fullWindow)) &&
+    !/\d[\d,]{3,}\s*tokens?\s*>/.test(overflowMessage(fullWindow)),
+);
+
 // A long conversation gets trimmed from the oldest end, and the oldest turn is
 // where the system prompt lives. Losing it left the model with no instructions
 // at all, which reads as the agent forgetting who it is mid-conversation.
@@ -433,6 +458,14 @@ const systemKept = buildPayload(
   "m",
   undefined,
   "conv-5",
+);
+// Twice, the way a second refusal would: the system prompt was put back on the
+// earliest turn the first time, and that turn is the next to go.
+shrinkPayload(systemKept, 0.6);
+shrinkPayload(systemKept, 0.6);
+check(
+  "the system prompt is there exactly once after two refits",
+  JSON.stringify(systemKept).split("SYSTEM_MARKER").length === 2,
 );
 check("trimming does not take the system prompt with it", JSON.stringify(systemKept).includes("SYSTEM_MARKER"));
 check(

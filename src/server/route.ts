@@ -5,7 +5,8 @@ import type { MessagesRequest } from "../anthropic/type.ts";
 import { PROXY_API_KEY } from "../core/config.ts";
 import { log } from "../core/log.ts";
 import { auth } from "../kiro/auth.ts";
-import { invoke, KiroApiError } from "../kiro/client.ts";
+import { KiroApiError } from "../kiro/client.ts";
+import { invokeFitted, overflowed, overflowMessage } from "../kiro/fit.ts";
 import { systemText, textOf } from "../kiro/convert.ts";
 import { KNOWN_MODELS, normalizeModel } from "../kiro/model.ts";
 import { buildPayload } from "../kiro/payload.ts";
@@ -115,7 +116,7 @@ const handleMessages = async (request: Request): Promise<Response> => {
 
   try {
     const builder = new ResponseBuilder(thinking);
-    for await (const event of invoke(payload, request.signal)) builder.accept(event);
+    for await (const event of invokeFitted(payload, request.signal)) builder.accept(event);
     log.info(
       `completed model=${model} credits=${builder.credits.toFixed(4)} context=${builder.contextUsagePercent.toFixed(1)}%`,
     );
@@ -125,7 +126,7 @@ const handleMessages = async (request: Request): Promise<Response> => {
       log.error(`kiro error ${error.status}: ${error.message}`);
       const type =
         error.status === 429 ? "rate_limit_error" : error.status >= 500 ? "api_error" : "invalid_request_error";
-      return json(errorBody(type, error.message), error.status);
+      return json(errorBody(type, overflowed(error) ? overflowMessage(error) : error.message), error.status);
     }
     const message = error instanceof Error ? error.message : String(error);
     log.error(`unexpected error: ${message}`);

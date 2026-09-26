@@ -30,24 +30,44 @@ export const desktopRefreshUrl = (region: string): string =>
   `https://prod.${region}.auth.desktop.kiro.dev/refreshToken`;
 
 /**
- * Kiro refuses a payload past a byte ceiling, so history is trimmed below it.
+ * The model's context window, in tokens.
  *
- * Measured 2026-09-15 by bisecting real requests through this proxy with the
- * trimming disabled: 2,380,000 bytes answered, 2,395,000 came back 400
- * `Input content length exceeds threshold.` The old comment here said ~615KB
- * with a different error text, so the service moved at some point and the
- * ceiling had been costing us four times the room we have.
+ * ★This is the real limit, and it is 1M. Kiro's `Input content length exceeds
+ * threshold.` is the window being full, not a byte ceiling. Measured
+ * 2026-09-27 against the service directly (no trimming in between):
  *
- * It is bytes and not tokens: 2.25MB of ASCII (about 560K tokens) went
- * through, while 2.4MB of Korean (about 390K) did not. Compressing the body
- * does not help either — `content-encoding: gzip` is answered with
- * "Improperly formed request", and the conversation is stateless, so nothing
- * can be left on the far side between calls.
+ * - `contextUsageEvent.contextUsagePercentage` is the prompt over exactly
+ *   1,000,000 tokens. The same text counted by Anthropic's count_tokens grew
+ *   by 125,001 tokens between 500KB and 1MB, and the percentage grew by
+ *   12.500 points over the same step.
+ * - The 400 lands exactly where that percentage would pass 100: 99.36%
+ *   answered, the next step up (about 100.6%) was refused.
+ * - Bytes do not decide it. Real TypeScript went through at 2.55MB (96%, and a
+ *   needle 5% from the front was found), while a token-dense filler was
+ *   refused at 2.07MB.
  *
- * 2,000,000 keeps 16% back for the envelope and for the fact that a
- * conversation grows between the size check and the send.
+ * The old reading ("a 2.38MB byte wall") came from bisecting one filler and
+ * converting it with a 4-characters-per-token guess, which made a full window
+ * look like 560K tokens.
  */
-export const MAX_PAYLOAD_BYTES: number = Number(env("KIRO_MAX_PAYLOAD_BYTES", "2000000"));
+export const CONTEXT_WINDOW: number = Number(env("KIRO_CONTEXT_WINDOW", "1000000"));
+
+/**
+ * A last-resort size cap, applied before sending.
+ *
+ * Not the limit that matters: the window is counted in tokens (see
+ * CONTEXT_WINDOW) and anything over it is refused and refitted after the fact
+ * (kiro/fit.ts). This only stops a request so large that no token density
+ * could fit it from being sent at all - 1M tokens is under 5MB of any real
+ * text, images aside.
+ */
+export const MAX_PAYLOAD_BYTES: number = Number(env("KIRO_MAX_PAYLOAD_BYTES", "12000000"));
+
+/** How many times an over-window request is shrunk and sent again. */
+export const MAX_REFIT: number = Number(env("KIRO_MAX_REFIT", "5"));
+
+/** What each refit keeps of the payload's bytes. */
+export const REFIT_RATIO = 0.85;
 
 /** Kiro rejects tool descriptions past this length; longer ones move to the system prompt. */
 export const MAX_TOOL_DESCRIPTION: number = Number(env("KIRO_MAX_TOOL_DESCRIPTION", "10000"));
