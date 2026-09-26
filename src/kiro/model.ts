@@ -2,8 +2,9 @@
  * Model registry.
  *
  * Kiro's runtime endpoint (`runtime.<region>.kiro.dev`) has no model-listing
- * API, so this list cannot be discovered at runtime — every entry below was
- * verified by actually issuing a request and getting a 200 back. An unknown id
+ * API, so this list cannot be discovered at runtime. Refresh it from
+ * `kiro-cli chat --list-models`; every entry below was verified by actually
+ * issuing a request through this proxy and getting a 200 back. An unknown id
  * is still forwarded as-is: if Kiro adds a model, it works before this list
  * catches up, and an id that truly does not exist comes back as a clean 400
  * ("Invalid model ID or insufficient subscription level to use it").
@@ -13,6 +14,7 @@
  */
 export const KNOWN_MODELS: readonly string[] = [
   "auto",
+  "claude-opus-5.5",
   "claude-opus-5",
   "claude-opus-4.8",
   "claude-opus-4.7",
@@ -23,6 +25,9 @@ export const KNOWN_MODELS: readonly string[] = [
   "claude-sonnet-4.5",
   "claude-sonnet-4",
   "claude-haiku-4.5",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
   "deepseek-3.2",
   "glm-5",
   "minimax-m2.5",
