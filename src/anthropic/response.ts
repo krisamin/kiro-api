@@ -64,7 +64,12 @@ export const promptFromContext = (percent: number, outputToken: number): number 
 export class ResponseBuilder {
   private readonly texts: string[] = [];
   private readonly tools = new Map<string, ToolAccumulator>();
-  private order: Array<{ kind: "text"; value: string } | { kind: "tool"; id: string }> = [];
+  private order: Array<
+    | { kind: "text"; value: string }
+    | { kind: "tool"; id: string }
+    | { kind: "reasoning"; value: string; signature?: string }
+  > = [];
+  private reasoningChars = 0;
   private stopReason: string | undefined;
   private creditUsage = 0;
   private contextPercent = 0;
@@ -97,6 +102,23 @@ export class ResponseBuilder {
           this.order.push({ kind: "tool", id: toolUseId });
         }
         if (input) acc.json += input;
+        break;
+      }
+      case "reasoning": {
+        const { text, signature } = event.data;
+        const last = this.order[this.order.length - 1];
+        const block = last?.kind === "reasoning" && !last.signature ? last : undefined;
+        if (text) {
+          this.reasoningChars += text.length;
+          if (block) block.value += text;
+          else this.order.push({ kind: "reasoning", value: text });
+        } else if (signature && block) {
+          block.signature = signature;
+        }
+        if (text && signature) {
+          const current = this.order[this.order.length - 1];
+          if (current?.kind === "reasoning") current.signature = signature;
+        }
         break;
       }
       case "metadata":
@@ -133,6 +155,10 @@ export class ResponseBuilder {
   blocks(): AnthropicContentBlock[] {
     const out: AnthropicContentBlock[] = [];
     for (const item of this.order) {
+      if (item.kind === "reasoning") {
+        out.push({ type: "thinking", thinking: item.value, ...(item.signature ? { signature: item.signature } : {}) });
+        continue;
+      }
       if (item.kind === "text") {
         if (!item.value) continue;
         if (!this.splitThinking) {
@@ -154,7 +180,7 @@ export class ResponseBuilder {
   }
 
   usage(promptToken: number): AnthropicUsage {
-    const output = estimateTokens(this.text) + this.tools.size * 8;
+    const output = estimateTokens(this.text) + Math.ceil(this.reasoningChars / 4) + this.tools.size * 8;
     return { input_tokens: promptFromContext(this.contextPercent, output) ?? promptToken, output_tokens: output };
   }
 

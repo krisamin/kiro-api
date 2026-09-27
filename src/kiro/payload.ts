@@ -2,7 +2,7 @@ import type { MessagesRequest } from "../anthropic/type.ts";
 import { MAX_PAYLOAD_BYTES } from "../core/config.ts";
 import { log } from "../core/log.ts";
 import { convertTools, type NormalMessage, normalizeMessages, systemText } from "./convert.ts";
-import { THINKING_INSTRUCTION, thinkingAllowed, thinkingAsked } from "./thinking.ts";
+import { nativeThinking, THINKING_FIELDS, THINKING_INSTRUCTION, thinkingAllowed, thinkingAsked } from "./thinking.ts";
 import type { KiroHistoryEntry, KiroPayload, KiroUserInputMessage } from "./type.ts";
 
 /**
@@ -191,6 +191,28 @@ export const stripThinking = (payload: KiroPayload): boolean => {
   return removed;
 };
 
+/**
+ * Turn native thinking off on a built payload, after the model refused the
+ * field, and ask for it in the prompt instead where that is allowed. Returns
+ * false when the payload had no native thinking to give up.
+ */
+export const dropNativeThinking = (payload: KiroPayload): boolean => {
+  if (!payload.additionalModelRequestFields?.thinking) return false;
+  delete payload.additionalModelRequestFields.thinking;
+  if (Object.keys(payload.additionalModelRequestFields).length === 0) delete payload.additionalModelRequestFields;
+  const state = payload.conversationState;
+  const model = state.currentMessage.userInputMessage.modelId;
+  if (thinkingAllowed(model)) {
+    const first = state.history?.find((entry) => "userInputMessage" in entry);
+    const target =
+      first && "userInputMessage" in first ? first.userInputMessage : state.currentMessage.userInputMessage;
+    target.content = `${THINKING_INSTRUCTION}\n\n${target.content}`;
+    const system = systemOf.get(payload);
+    systemOf.set(payload, system ? `${system}\n\n${THINKING_INSTRUCTION}` : THINKING_INSTRUCTION);
+  }
+  return true;
+};
+
 export const buildPayload = (
   request: MessagesRequest,
   modelId: string,
@@ -204,11 +226,15 @@ export const buildPayload = (
   if (documentation) system = system ? system + documentation : documentation.trim();
   // Reasoning is asked for here and parsed back out of the answer; the service
   // has no parameter for it. See kiro/thinking.ts for why it is not a tool.
-  if (thinkingAsked(request) && thinkingAllowed(modelId)) {
+  const native = thinkingAsked(request) && nativeThinking(modelId);
+  if (thinkingAsked(request) && !native && thinkingAllowed(modelId)) {
     system = system ? `${system}\n\n${THINKING_INSTRUCTION}` : THINKING_INSTRUCTION;
   }
 
-  const messages = normalizeMessages(request.messages, hasTools);
+  // Past reasoning is not replayed with native thinking on: the model thinks
+  // afresh each turn, as the Messages API does with earlier turns, and a
+  // transcript full of written-out reasoning is what Opus's guard refuses.
+  const messages = normalizeMessages(request.messages, hasTools, !native);
   if (messages.length === 0) throw new Error("No messages to send");
 
   const historyMessages = messages.slice(0, -1);
@@ -268,6 +294,7 @@ export const buildPayload = (
       ...(history.length > 0 ? { history } : {}),
     },
     ...(profileArn ? { profileArn } : {}),
+    ...(native ? { additionalModelRequestFields: { ...THINKING_FIELDS } } : {}),
   };
 
   // Trimming drops the oldest turns, and the oldest turn is the one holding the

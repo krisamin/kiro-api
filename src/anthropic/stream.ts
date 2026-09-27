@@ -153,6 +153,24 @@ export const streamResponse = (
             continue;
           }
 
+          if (event.type === "reasoning") {
+            const { text, signature } = event.data;
+            if (!firstTextAt) firstTextAt = performance.now();
+            if (text) writePieces([{ kind: "thinking", text }]);
+            // The signature closes the block it belongs to. A model that chose
+            // not to think sends one with no text; there is no block to sign.
+            if (signature && open?.kind === "thinking") {
+              controller.enqueue(
+                sse("content_block_delta", {
+                  type: "content_block_delta",
+                  index: open.index,
+                  delta: { type: "signature_delta", signature },
+                }),
+              );
+            }
+            continue;
+          }
+
           if (event.type === "toolUse") {
             const { toolUseId, name, input, stop } = event.data;
             sawToolUse = true;

@@ -13,7 +13,7 @@ import type { KiroImage, KiroToolResult, KiroToolSpec, KiroToolUse } from "./typ
  * enforced here rather than discovered at runtime.
  */
 
-export const textOf = (content: string | AnthropicContentBlock[] | undefined): string => {
+export const textOf = (content: string | AnthropicContentBlock[] | undefined, keepThinking = true): string => {
   if (content === undefined) return "";
   if (typeof content === "string") return content;
   const parts: string[] = [];
@@ -23,7 +23,7 @@ export const textOf = (content: string | AnthropicContentBlock[] | undefined): s
     // it can only come back as text, and unmarked it read as something the
     // model had said out loud. The tags are the ones it was asked to write in
     // the first place (kiro/thinking.ts), so this is the same shape either way.
-    else if (block.type === "thinking" && block.thinking) {
+    else if (keepThinking && block.type === "thinking" && block.thinking) {
       parts.push(`${THINKING_OPEN}${block.thinking}${THINKING_CLOSE}`);
     }
   }
@@ -171,12 +171,16 @@ const hasPayload = (msg: NormalMessage): boolean =>
  * Flatten Anthropic messages into Kiro's model, then enforce its structural
  * rules: known roles only, user first, strict user/assistant alternation.
  */
-export const normalizeMessages = (messages: AnthropicMessage[], keepTools: boolean): NormalMessage[] => {
+export const normalizeMessages = (
+  messages: AnthropicMessage[],
+  keepTools: boolean,
+  keepThinking = true,
+): NormalMessage[] => {
   const flat: NormalMessage[] = messages.map((msg) => ({
     // Kiro only understands user/assistant; anything else (e.g. "developer")
     // becomes a user turn rather than being dropped.
     role: msg.role === "assistant" ? "assistant" : "user",
-    text: textOf(msg.content),
+    text: textOf(msg.content, keepThinking),
     images: imagesOf(msg.content),
     toolUses: keepTools ? toolUsesOf(msg.content) : [],
     toolResults: keepTools ? toolResultsOf(msg.content) : [],

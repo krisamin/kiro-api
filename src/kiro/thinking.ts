@@ -67,6 +67,30 @@ export const thinkingAsked = (request: MessagesRequest): boolean =>
  */
 export const noThinkingModelSet = new Set<string>(["claude-opus-5.5", "claude-opus-5"]);
 
+/**
+ * ★The real channel. `additionalModelRequestFields.thinking = {type:
+ * "adaptive"}` turns on the model's own extended thinking and it streams back
+ * as `reasoningContentEvent` (text pieces, then a signature) - kiro-cli's
+ * streaming client has the event type. Measured 2026-09-27: opus-5.5 and
+ * opus-5 think and are not refused, sonnet-5 accepts it (and may skip thinking
+ * on an easy question). The field is schema-checked: `adaptive` is the only
+ * type, `enabled`/`budget_tokens` is a 400.
+ *
+ * Models that do not take it answer 400 before a byte is streamed - haiku-4.5
+ * and glm-5 ("not supported for this model"), gpt-5.6-sol (its schema has no
+ * `thinking`). Those are seeded here; any other is learned on its first 400
+ * (kiro/fit.ts) and falls back to the prompt instruction below.
+ */
+export const THINKING_FIELDS = { thinking: { type: "adaptive" } } as const;
+export const noNativeThinkingSet = new Set<string>([
+  "claude-haiku-4.5",
+  "glm-5",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+]);
+export const nativeThinking = (modelId: string): boolean => !noNativeThinkingSet.has(modelId);
+
 /** Whether to put the thinking instruction on a request for this model. */
 export const thinkingAllowed = (modelId: string): boolean => !noThinkingModelSet.has(modelId);
 

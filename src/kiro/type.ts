@@ -44,6 +44,8 @@ export type KiroHistoryEntry =
 
 export type KiroPayload = {
   profileArn?: string;
+  /** Model options passed through to the model; `thinking` is the one used. */
+  additionalModelRequestFields?: Record<string, unknown>;
   conversationState: {
     chatTriggerType: "MANUAL";
     conversationId: string;
@@ -74,6 +76,13 @@ export type MetadataEvent = {
   stopDetails?: { refusal?: { category?: string; explanation?: string } };
 };
 
+/**
+ * Native reasoning, streamed apart from the answer. `text` pieces arrive first
+ * and a closing event carries the `signature`; a model that decided not to
+ * think sends the signature alone.
+ */
+export type ReasoningContentEvent = { text?: string; signature?: string; redactedContent?: string };
+
 export type ContextUsageEvent = { contextUsagePercentage?: number };
 
 export type MeteringEvent = { unit?: string; unitPlural?: string; usage?: number };
@@ -82,6 +91,7 @@ export type KiroEvent =
   | { type: "assistantResponse"; data: AssistantResponseEvent }
   | { type: "toolUse"; data: ToolUseEvent }
   | { type: "metadata"; data: MetadataEvent }
+  | { type: "reasoning"; data: ReasoningContentEvent }
   | { type: "contextUsage"; data: ContextUsageEvent }
   | { type: "metering"; data: MeteringEvent }
   | { type: "error"; data: { message: string; name?: string } }

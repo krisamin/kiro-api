@@ -15,7 +15,7 @@ import { convertTools, normalizeMessages, sanitizeSchema, textOf } from "./kiro/
 import { crc32, EventStreamDecoder } from "./kiro/event-stream.ts";
 import { overflowed, overflowMessage } from "./kiro/fit.ts";
 import { KNOWN_MODELS, normalizeModel } from "./kiro/model.ts";
-import { buildPayload, shrinkPayload, stripThinking } from "./kiro/payload.ts";
+import { buildPayload, dropNativeThinking, shrinkPayload, stripThinking } from "./kiro/payload.ts";
 import { splitThinking, THINKING_CLOSE, THINKING_OPEN, ThinkingSplitter, thinkingAsked } from "./kiro/thinking.ts";
 import type { KiroHistoryEntry } from "./kiro/type.ts";
 import { promptTokenOf } from "./server/route.ts";
@@ -442,15 +442,58 @@ eq("prompt from context: never below one", promptFromContext(0.0001, 50), 1);
     messages: [{ role: "user", content: "hi" }],
   } as MessagesRequest;
   const opus = buildPayload(ask, "claude-opus-5.5", undefined, "c-opus");
-  check("opus is not asked for reasoning", !JSON.stringify(opus).includes(THINKING_OPEN));
-  const sonnet = buildPayload(ask, "claude-sonnet-5", undefined, "c-sonnet");
-  check("sonnet still is", JSON.stringify(sonnet).includes(THINKING_OPEN));
-  check("the instruction can be stripped", stripThinking(sonnet) && !JSON.stringify(sonnet).includes(THINKING_OPEN));
+  check(
+    "opus gets native thinking",
+    JSON.stringify(opus.additionalModelRequestFields) === '{"thinking":{"type":"adaptive"}}',
+  );
+  check("and no written-reasoning instruction", !JSON.stringify(opus).includes(THINKING_OPEN));
+  const haiku = buildPayload(ask, "claude-haiku-4.5", undefined, "c-haiku");
+  check("a model without native thinking gets no field", haiku.additionalModelRequestFields === undefined);
+  check("and is asked in the prompt", JSON.stringify(haiku).includes(THINKING_OPEN));
+  check("the instruction can be stripped", stripThinking(haiku) && !JSON.stringify(haiku).includes(THINKING_OPEN));
   check(
     "the system prompt survives the strip",
-    sonnet.conversationState.currentMessage.userInputMessage.content.startsWith("SYS"),
+    haiku.conversationState.currentMessage.userInputMessage.content.startsWith("SYS"),
   );
-  check("a second strip finds nothing", !stripThinking(sonnet));
+  check("a second strip finds nothing", !stripThinking(haiku));
+  const sonnet = buildPayload(ask, "claude-sonnet-5", undefined, "c-sonnet");
+  check(
+    "dropping native thinking removes the field",
+    dropNativeThinking(sonnet) && sonnet.additionalModelRequestFields === undefined,
+  );
+  check("and falls back to the instruction", JSON.stringify(sonnet).includes(THINKING_OPEN));
+  const replay = buildPayload(
+    {
+      ...ask,
+      messages: [
+        { role: "user", content: "q" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "OLD_REASON" },
+            { type: "text", text: "a" },
+          ],
+        },
+        { role: "user", content: "q2" },
+      ],
+    } as MessagesRequest,
+    "claude-opus-5.5",
+    undefined,
+    "c-replay",
+  );
+  check("past reasoning is not replayed with native thinking", !JSON.stringify(replay).includes("OLD_REASON"));
+  const nb = new ResponseBuilder(true);
+  nb.accept({ type: "reasoning", data: { text: "thinking it over" } });
+  nb.accept({ type: "reasoning", data: { signature: "SIG" } });
+  nb.accept({ type: "assistantResponse", data: { content: "answer" } });
+  eq(
+    "native reasoning becomes a signed thinking block",
+    JSON.stringify(nb.blocks()),
+    JSON.stringify([
+      { type: "thinking", thinking: "thinking it over", signature: "SIG" },
+      { type: "text", text: "answer" },
+    ]),
+  );
 }
 
 // Kiro's refusal for a full window, and how it is passed on.
@@ -500,7 +543,7 @@ check(
   "the instruction rides in the prompt, not in a parameter",
   buildPayload(
     { model: "m", messages: [{ role: "user", content: "hi" }], thinking: { type: "enabled" } },
-    "claude-sonnet-5",
+    "claude-haiku-4.5",
     undefined,
     "selftest-thinking",
   ).conversationState.currentMessage.userInputMessage.content.includes(THINKING_OPEN),

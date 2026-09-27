@@ -9,6 +9,7 @@ import type {
   KiroPayload,
   MetadataEvent,
   MeteringEvent,
+  ReasoningContentEvent,
   ToolUseEvent,
 } from "./type.ts";
 
@@ -43,6 +44,8 @@ const toEvent = (eventType: string, raw: Record<string, unknown>): KiroEvent => 
       return { type: "toolUse", data: raw as unknown as ToolUseEvent };
     case "metadataEvent":
       return { type: "metadata", data: raw as MetadataEvent };
+    case "reasoningContentEvent":
+      return { type: "reasoning", data: raw as ReasoningContentEvent };
     case "contextUsageEvent":
       return { type: "contextUsage", data: raw as ContextUsageEvent };
     case "meteringEvent":

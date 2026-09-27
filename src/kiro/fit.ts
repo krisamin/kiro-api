@@ -1,8 +1,8 @@
 import { CONTEXT_WINDOW, MAX_REFIT, REFIT_RATIO } from "../core/config.ts";
 import { log } from "../core/log.ts";
 import { invoke, KiroApiError } from "./client.ts";
-import { shrinkPayload, stripThinking } from "./payload.ts";
-import { noThinkingModelSet } from "./thinking.ts";
+import { dropNativeThinking, shrinkPayload, stripThinking } from "./payload.ts";
+import { noNativeThinkingSet, noThinkingModelSet } from "./thinking.ts";
 import type { KiroEvent, KiroPayload } from "./type.ts";
 
 /** Kiro's wording for a prompt that does not fit the window. */
@@ -47,7 +47,7 @@ export async function* invokeFitted(payload: KiroPayload, signal?: AbortSignal):
             retryWithoutThinking = true;
             break;
           }
-          if (event.type !== "assistantResponse" && event.type !== "toolUse") {
+          if (event.type !== "assistantResponse" && event.type !== "toolUse" && event.type !== "reasoning") {
             held.push(event);
             continue;
           }
@@ -68,12 +68,23 @@ export async function* invokeFitted(payload: KiroPayload, signal?: AbortSignal):
       yield* held;
       return;
     } catch (error) {
+      if (!yielded && nativeRefused(error) && dropNativeThinking(payload)) {
+        const model = payload.conversationState.currentMessage.userInputMessage.modelId;
+        noNativeThinkingSet.add(model);
+        log.warn(`${model} does not take native thinking; falling back to the prompt instruction`);
+        attempt--;
+        continue;
+      }
       if (yielded || !overflowed(error) || attempt >= MAX_REFIT || signal?.aborted) throw error;
       if (!shrinkPayload(payload, REFIT_RATIO)) throw error;
       log.warn(`over the context window; refit ${attempt + 1}/${MAX_REFIT} kept ${REFIT_RATIO * 100}% and retrying`);
     }
   }
 }
+
+/** A model that does not take `additionalModelRequestFields` (or its `thinking`). */
+const nativeRefused = (error: unknown): boolean =>
+  error instanceof KiroApiError && error.status === 400 && /additionalModelRequestFields/.test(error.message);
 
 /** Kiro's refusal of a prompt that asks the model to write its reasoning down. */
 const reasoningRefused = (data: { stopDetails?: { refusal?: { category?: string } } }): boolean =>
