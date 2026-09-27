@@ -50,6 +50,26 @@ export const THINKING_INSTRUCTION =
 export const thinkingAsked = (request: MessagesRequest): boolean =>
   request.thinking !== undefined && request.thinking.type !== "disabled";
 
+/**
+ * Models Kiro will not let us ask for written-out reasoning.
+ *
+ * ★Since 2026-09-27 Kiro refuses any prompt that asks Opus to write its
+ * reasoning down, with `stopDetails.refusal.category` REASONING_EXTRACTION and
+ * no text at all. Measured on claude-opus-5.5 and claude-opus-5: the current
+ * instruction, three rewordings ("working notes", "a short plan", "a
+ * scratchpad") and two other tag names (`<memo>`, `<draft>`) were all refused,
+ * the last one after it had already streamed part of the draft. claude-sonnet-5
+ * took every one of them. So it is the model's guard, not the wording, and the
+ * answer is to not ask: those models answer without a thinking block.
+ *
+ * Seeded with the ones measured; any other model that refuses the same way is
+ * added the first time it does (kiro/fit.ts), for as long as the process runs.
+ */
+export const noThinkingModelSet = new Set<string>(["claude-opus-5.5", "claude-opus-5"]);
+
+/** Whether to put the thinking instruction on a request for this model. */
+export const thinkingAllowed = (modelId: string): boolean => !noThinkingModelSet.has(modelId);
+
 export type ThinkingPiece = { kind: "text" | "thinking"; text: string };
 
 /** How much of `text`'s tail could still turn into `needle` once more arrives. */

@@ -2,6 +2,7 @@ import { PING_INTERVAL_MS } from "../core/config.ts";
 import { log } from "../core/log.ts";
 import { KiroApiError } from "../kiro/client.ts";
 import { invokeFitted, overflowed, overflowMessage } from "../kiro/fit.ts";
+import { dumpEmpty, refusalOf } from "../kiro/refusal.ts";
 import { type ThinkingPiece, ThinkingSplitter } from "../kiro/thinking.ts";
 import type { KiroPayload } from "../kiro/type.ts";
 import { estimateTokens, mapStopReason, messageId, promptFromContext } from "./response.ts";
@@ -61,6 +62,7 @@ export const streamResponse = (
       let chunkCount = 0;
       let thoughtChars = 0;
       let contextPercent = 0;
+      let refusal: string | undefined;
 
       const closeOpen = (): void => {
         if (!open) return;
@@ -190,6 +192,8 @@ export const streamResponse = (
             continue;
           }
 
+          if (event.type === "metadata") refusal = refusalOf(event.data) ?? refusal;
+
           if (event.type === "metadata" && event.data.stopReason) {
             stopReason = event.data.stopReason;
           }
@@ -197,6 +201,14 @@ export const streamResponse = (
 
         if (splitter) writePieces(splitter.end());
         closeOpen();
+
+        // A refusal ends the stream like any answer, just with nothing in it.
+        // Passed on as-is it reads as "the model returned no content" and
+        // hides the reason, so it becomes an error that says what happened.
+        if (!outputText && !thoughtChars && !sawToolUse) {
+          dumpEmpty(payload, refusal ?? `stop=${stopReason ?? "none"}`);
+          if (refusal) throw new Error(refusal);
+        }
 
         const outputTokens = estimateTokens(outputText) + Math.ceil(thoughtChars / 4) + toolIds.size * 8;
         controller.enqueue(

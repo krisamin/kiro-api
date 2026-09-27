@@ -64,7 +64,15 @@ export type ToolUseEvent = {
   stop?: boolean;
 };
 
-export type MetadataEvent = { stopReason?: string; conversationId?: string };
+/**
+ * `stopDetails.refusal` is how Kiro says the model declined: the stream ends
+ * normally with no text at all, and this is the only sign of why.
+ */
+export type MetadataEvent = {
+  stopReason?: string;
+  conversationId?: string;
+  stopDetails?: { refusal?: { category?: string; explanation?: string } };
+};
 
 export type ContextUsageEvent = { contextUsagePercentage?: number };
 

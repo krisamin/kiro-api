@@ -2,7 +2,7 @@ import type { MessagesRequest } from "../anthropic/type.ts";
 import { MAX_PAYLOAD_BYTES } from "../core/config.ts";
 import { log } from "../core/log.ts";
 import { convertTools, type NormalMessage, normalizeMessages, systemText } from "./convert.ts";
-import { THINKING_INSTRUCTION, thinkingAsked } from "./thinking.ts";
+import { THINKING_INSTRUCTION, thinkingAllowed, thinkingAsked } from "./thinking.ts";
 import type { KiroHistoryEntry, KiroPayload, KiroUserInputMessage } from "./type.ts";
 
 /**
@@ -165,6 +165,32 @@ export const shrinkPayload = (payload: KiroPayload, ratio: number): boolean => {
   return true;
 };
 
+/**
+ * Take the thinking instruction back out of a built payload.
+ *
+ * It sits on the earliest user turn with the rest of the system prompt, so it
+ * is removed there and from the remembered system prompt a later trim puts
+ * back. Returns false when there was none to remove.
+ */
+export const stripThinking = (payload: KiroPayload): boolean => {
+  const state = payload.conversationState;
+  const turns = [
+    ...(state.history ?? []).flatMap((entry) => ("userInputMessage" in entry ? [entry.userInputMessage] : [])),
+    state.currentMessage.userInputMessage,
+  ];
+  let removed = false;
+  for (const turn of turns) {
+    if (!turn.content.includes(THINKING_INSTRUCTION)) continue;
+    turn.content = turn.content.replace(`\n\n${THINKING_INSTRUCTION}`, "").replace(THINKING_INSTRUCTION, "");
+    removed = true;
+  }
+  const system = systemOf.get(payload);
+  if (system?.includes(THINKING_INSTRUCTION)) {
+    systemOf.set(payload, system.replace(`\n\n${THINKING_INSTRUCTION}`, "").replace(THINKING_INSTRUCTION, ""));
+  }
+  return removed;
+};
+
 export const buildPayload = (
   request: MessagesRequest,
   modelId: string,
@@ -178,7 +204,7 @@ export const buildPayload = (
   if (documentation) system = system ? system + documentation : documentation.trim();
   // Reasoning is asked for here and parsed back out of the answer; the service
   // has no parameter for it. See kiro/thinking.ts for why it is not a tool.
-  if (thinkingAsked(request)) {
+  if (thinkingAsked(request) && thinkingAllowed(modelId)) {
     system = system ? `${system}\n\n${THINKING_INSTRUCTION}` : THINKING_INSTRUCTION;
   }
 

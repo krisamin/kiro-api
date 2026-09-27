@@ -15,7 +15,7 @@ import { convertTools, normalizeMessages, sanitizeSchema, textOf } from "./kiro/
 import { crc32, EventStreamDecoder } from "./kiro/event-stream.ts";
 import { overflowed, overflowMessage } from "./kiro/fit.ts";
 import { KNOWN_MODELS, normalizeModel } from "./kiro/model.ts";
-import { buildPayload, shrinkPayload } from "./kiro/payload.ts";
+import { buildPayload, shrinkPayload, stripThinking } from "./kiro/payload.ts";
 import { splitThinking, THINKING_CLOSE, THINKING_OPEN, ThinkingSplitter, thinkingAsked } from "./kiro/thinking.ts";
 import type { KiroHistoryEntry } from "./kiro/type.ts";
 import { promptTokenOf } from "./server/route.ts";
@@ -432,6 +432,27 @@ eq("prompt from context: 39.3485% of 1M less the reply", promptFromContext(39.34
 eq("prompt from context: no report falls back", promptFromContext(0, 10), undefined);
 eq("prompt from context: never below one", promptFromContext(0.0001, 50), 1);
 
+// Opus is not asked for written reasoning (Kiro refuses it), others still are,
+// and a payload that has the instruction can have it taken back out.
+{
+  const ask: MessagesRequest = {
+    model: "m",
+    thinking: { type: "adaptive" },
+    system: "SYS",
+    messages: [{ role: "user", content: "hi" }],
+  } as MessagesRequest;
+  const opus = buildPayload(ask, "claude-opus-5.5", undefined, "c-opus");
+  check("opus is not asked for reasoning", !JSON.stringify(opus).includes(THINKING_OPEN));
+  const sonnet = buildPayload(ask, "claude-sonnet-5", undefined, "c-sonnet");
+  check("sonnet still is", JSON.stringify(sonnet).includes(THINKING_OPEN));
+  check("the instruction can be stripped", stripThinking(sonnet) && !JSON.stringify(sonnet).includes(THINKING_OPEN));
+  check(
+    "the system prompt survives the strip",
+    sonnet.conversationState.currentMessage.userInputMessage.content.startsWith("SYS"),
+  );
+  check("a second strip finds nothing", !stripThinking(sonnet));
+}
+
 // Kiro's refusal for a full window, and how it is passed on.
 const fullWindow = new KiroApiError("Input content length exceeds threshold.", 400, "{}");
 check("a full window is recognised", overflowed(fullWindow));
@@ -479,7 +500,7 @@ check(
   "the instruction rides in the prompt, not in a parameter",
   buildPayload(
     { model: "m", messages: [{ role: "user", content: "hi" }], thinking: { type: "enabled" } },
-    "claude-opus-5",
+    "claude-sonnet-5",
     undefined,
     "selftest-thinking",
   ).conversationState.currentMessage.userInputMessage.content.includes(THINKING_OPEN),

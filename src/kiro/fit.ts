@@ -1,7 +1,8 @@
 import { CONTEXT_WINDOW, MAX_REFIT, REFIT_RATIO } from "../core/config.ts";
 import { log } from "../core/log.ts";
 import { invoke, KiroApiError } from "./client.ts";
-import { shrinkPayload } from "./payload.ts";
+import { shrinkPayload, stripThinking } from "./payload.ts";
+import { noThinkingModelSet } from "./thinking.ts";
 import type { KiroEvent, KiroPayload } from "./type.ts";
 
 /** Kiro's wording for a prompt that does not fit the window. */
@@ -34,11 +35,37 @@ export const overflowMessage = (error: KiroApiError): string =>
 export async function* invokeFitted(payload: KiroPayload, signal?: AbortSignal): AsyncGenerator<KiroEvent> {
   for (let attempt = 0; ; attempt++) {
     let yielded = false;
+    // Events before the first word are held: a reasoning refusal arrives as
+    // metadata on a stream that said nothing, and a retry is only invisible to
+    // the caller while nothing has been passed on.
+    const held: KiroEvent[] = [];
+    let retryWithoutThinking = false;
     try {
       for await (const event of invoke(payload, signal)) {
-        yielded = true;
+        if (!yielded) {
+          if (event.type === "metadata" && reasoningRefused(event.data) && stripThinking(payload)) {
+            retryWithoutThinking = true;
+            break;
+          }
+          if (event.type !== "assistantResponse" && event.type !== "toolUse") {
+            held.push(event);
+            continue;
+          }
+          yielded = true;
+          yield* held;
+        }
         yield event;
       }
+      if (retryWithoutThinking) {
+        const model = payload.conversationState.currentMessage.userInputMessage.modelId;
+        noThinkingModelSet.add(model);
+        log.warn(
+          `${model} refused written reasoning (REASONING_EXTRACTION); retrying without the thinking instruction`,
+        );
+        attempt--;
+        continue;
+      }
+      yield* held;
       return;
     } catch (error) {
       if (yielded || !overflowed(error) || attempt >= MAX_REFIT || signal?.aborted) throw error;
@@ -47,6 +74,10 @@ export async function* invokeFitted(payload: KiroPayload, signal?: AbortSignal):
     }
   }
 }
+
+/** Kiro's refusal of a prompt that asks the model to write its reasoning down. */
+const reasoningRefused = (data: { stopDetails?: { refusal?: { category?: string } } }): boolean =>
+  data.stopDetails?.refusal?.category === "REASONING_EXTRACTION";
 
 /** The service's own prompt count, from its context-usage percentage. */
 export const measuredPromptToken = (percent: number): number | undefined =>

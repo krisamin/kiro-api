@@ -6,10 +6,11 @@ import { PROXY_API_KEY } from "../core/config.ts";
 import { log } from "../core/log.ts";
 import { auth } from "../kiro/auth.ts";
 import { KiroApiError } from "../kiro/client.ts";
-import { invokeFitted, overflowed, overflowMessage } from "../kiro/fit.ts";
 import { systemText, textOf } from "../kiro/convert.ts";
+import { invokeFitted, overflowed, overflowMessage } from "../kiro/fit.ts";
 import { KNOWN_MODELS, normalizeModel } from "../kiro/model.ts";
 import { buildPayload } from "../kiro/payload.ts";
+import { dumpEmpty } from "../kiro/refusal.ts";
 import { thinkingAsked } from "../kiro/thinking.ts";
 import type { KiroPayload } from "../kiro/type.ts";
 
@@ -71,8 +72,7 @@ export const promptTokenOf = (body: MessagesRequest): number => {
       } else if (block.type === "tool_use") {
         charCount += block.name.length + JSON.stringify(block.input ?? {}).length;
       } else if (block.type === "tool_result") {
-        charCount +=
-          typeof block.content === "string" ? block.content.length : textOf(block.content).length;
+        charCount += typeof block.content === "string" ? block.content.length : textOf(block.content).length;
       } else {
         charCount += textOf([block]).length;
       }
@@ -117,6 +117,10 @@ const handleMessages = async (request: Request): Promise<Response> => {
   try {
     const builder = new ResponseBuilder(thinking);
     for await (const event of invokeFitted(payload, request.signal)) builder.accept(event);
+    if (builder.blocks().length === 0) {
+      dumpEmpty(payload, builder.refusal ?? "no content");
+      if (builder.refusal) return json(errorBody("invalid_request_error", builder.refusal), 400);
+    }
     log.info(
       `completed model=${model} credits=${builder.credits.toFixed(4)} context=${builder.contextUsagePercent.toFixed(1)}%`,
     );

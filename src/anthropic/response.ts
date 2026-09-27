@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { measuredPromptToken } from "../kiro/fit.ts";
+import { refusalOf } from "../kiro/refusal.ts";
 import { splitThinking as splitThinkingText } from "../kiro/thinking.ts";
 import type { KiroEvent } from "../kiro/type.ts";
 import type { AnthropicContentBlock, AnthropicUsage, MessagesResponse, StopReason } from "./type.ts";
@@ -67,6 +68,7 @@ export class ResponseBuilder {
   private stopReason: string | undefined;
   private creditUsage = 0;
   private contextPercent = 0;
+  refusal: string | undefined;
 
   /**
    * When set, tagged reasoning inside the answer is lifted into thinking
@@ -99,6 +101,7 @@ export class ResponseBuilder {
       }
       case "metadata":
         if (event.data.stopReason) this.stopReason = event.data.stopReason;
+        this.refusal = refusalOf(event.data) ?? this.refusal;
         break;
       case "metering":
         this.creditUsage += event.data.usage ?? 0;
