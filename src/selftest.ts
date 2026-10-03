@@ -3,8 +3,6 @@ import { parseToolInput, promptFromContext, ResponseBuilder } from "./anthropic/
 import { streamResponse } from "./anthropic/stream.ts";
 import type { MessagesRequest } from "./anthropic/type.ts";
 import { auth } from "./kiro/auth.ts";
-import { invoke, KiroApiError } from "./kiro/client.ts";
-import { convertTools, normalizeMessages, sanitizeSchema, textOf } from "./kiro/convert.ts";
 /**
  * Self-test: pure conversion/parsing logic plus a live round trip.
  *
@@ -12,6 +10,9 @@ import { convertTools, normalizeMessages, sanitizeSchema, textOf } from "./kiro/
  * portion (the pure checks still run and are the ones that catch regressions in
  * Kiro's structural rules).
  */
+import { planOf, resetCache, settleCache } from "./kiro/cache.ts";
+import { invoke, KiroApiError } from "./kiro/client.ts";
+import { convertTools, normalizeMessages, sanitizeSchema, textOf } from "./kiro/convert.ts";
 import { crc32, EventStreamDecoder } from "./kiro/event-stream.ts";
 import { overflowed, overflowMessage } from "./kiro/fit.ts";
 import { KNOWN_MODELS, normalizeModel } from "./kiro/model.ts";
@@ -549,6 +550,78 @@ check(
   ).conversationState.currentMessage.userInputMessage.content.includes(THINKING_OPEN),
 );
 
+console.log("\n=== prompt cache split ===");
+// Kiro never reports cache tokens, though it caches: an agent loop's calls
+// cost a third of a fresh prompt's credits from the second call on. The split
+// is worked out from the payloads, the way the service behaves.
+{
+  resetCache();
+  const tool = [{ name: "get", description: "Get a thing.", input_schema: { type: "object", properties: {} } }];
+  const big = "rule ".repeat(20_000);
+  const turnList: MessagesRequest["messages"] = [
+    { role: "user", content: big },
+    { role: "assistant", content: "ok" },
+  ];
+  const callOf = (question: string, tools = tool) =>
+    buildPayload(
+      {
+        model: "claude-opus-5.5",
+        max_tokens: 10,
+        system: "terse",
+        tools,
+        messages: [...turnList, { role: "user", content: question }],
+      } as MessagesRequest,
+      "claude-opus-5.5",
+      undefined,
+      crypto.randomUUID(),
+    );
+  const t0 = 1_000_000;
+  const first = settleCache(planOf(callOf("q1")), 30_000, t0);
+  eq("first call reads nothing", first.read, 0);
+  check("first call writes its history", first.write > 25_000, JSON.stringify(first));
+  eq("parts add up to the prompt", first.read + first.write + first.fresh, 30_000);
+
+  const repeat = settleCache(planOf(callOf("q2")), 30_000, t0 + 1_000);
+  check("same history is read back", repeat.read > 25_000 && repeat.write === 0, JSON.stringify(repeat));
+
+  turnList.push({ role: "user", content: "log ".repeat(2_000) }, { role: "assistant", content: "noted" });
+  const grown = settleCache(planOf(callOf("q3")), 33_000, t0 + 2_000);
+  check(
+    "a grown history reads the old prefix and writes the new turns",
+    grown.read >= repeat.read && grown.read < 33_000 && grown.write > 1_000 && grown.write < 4_000,
+    JSON.stringify(grown),
+  );
+  eq("grown parts add up", grown.read + grown.write + grown.fresh, 33_000);
+
+  const otherTools = settleCache(
+    planOf(callOf("q4", [{ ...tool[0], name: "put" }] as typeof tool)),
+    33_000,
+    t0 + 3_000,
+  );
+  eq("a different tool list reads nothing", otherTools.read, 0);
+
+  const late = settleCache(planOf(callOf("q5")), 33_000, t0 + 2_000 + 5 * 60_000 + 1);
+  eq("an expired prefix reads nothing", late.read, 0);
+
+  eq(
+    "no history, nothing cached",
+    settleCache(
+      planOf(
+        buildPayload(
+          { model: "m", max_tokens: 1, messages: [{ role: "user", content: "hi" }] } as MessagesRequest,
+          "m",
+          undefined,
+          "c",
+        ),
+      ),
+      50,
+    ).fresh,
+    50,
+  );
+  eq("a malformed payload costs only the split", settleCache(planOf({} as never), 12).fresh, 12);
+  resetCache();
+}
+
 console.log("\n=== SSE stream contract ===");
 // The streaming path builds its own event sequence, and clients depend on that
 // exact order. Drive it end-to-end against a local server and assert the frames
@@ -570,6 +643,8 @@ const sseServer = Bun.serve({
       // missing final closeOpen() shows up as an unbalanced start/stop count.
       frame("assistantResponseEvent", '{"content":"!"}'),
       frame("messageMetadataEvent", '{"stopReason":"TOOL_USE"}'),
+      frame("contextUsageEvent", '{"contextUsagePercentage":4}'),
+      frame("meteringEvent", '{"unit":"credit","unitPlural":"credits","usage":0.5}'),
     ];
     return new Response(
       new ReadableStream<Uint8Array>({
@@ -589,7 +664,22 @@ try {
   Object.defineProperty(auth, "apiHost", { value: `http://127.0.0.1:${sseServer.port}`, writable: true });
   auth.token = async () => "selftest-token";
 
-  const response = streamResponse({} as never, "claude-sonnet-4.5", 12, new AbortController().signal);
+  resetCache();
+  const ssePayload = buildPayload(
+    {
+      model: "claude-sonnet-4.5",
+      max_tokens: 10,
+      messages: [
+        { role: "user", content: "context ".repeat(500) },
+        { role: "assistant", content: "ok" },
+        { role: "user", content: "go" },
+      ],
+    } as MessagesRequest,
+    "claude-sonnet-4.5",
+    undefined,
+    "sse",
+  );
+  const response = streamResponse(ssePayload, "claude-sonnet-4.5", 12, new AbortController().signal);
   const raw = await response.text();
   const names = [...raw.matchAll(/^event: (.+)$/gm)].map((m) => m[1]);
   const payloads = [...raw.matchAll(/^data: (.+)$/gm)].map((m) => JSON.parse(m[1] as string));
@@ -636,6 +726,22 @@ try {
   const delta = payloads.find((p) => p.type === "message_delta");
   eq("stream reports tool_use stop reason", delta?.delta?.stop_reason, "tool_use");
   check("stream reports usage", (delta?.usage?.output_tokens ?? 0) > 0);
+  const u = delta?.usage ?? {};
+  eq(
+    "stream prompt parts add up to the measured prompt",
+    u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens + u.output_tokens,
+    40_000,
+  );
+  check("stream reports the cache write of a history", u.cache_creation_input_tokens > 0, JSON.stringify(u));
+  const again = await streamResponse(ssePayload, "claude-sonnet-4.5", 12, new AbortController().signal).text();
+  const againDelta = [...again.matchAll(/^data: (.+)$/gm)]
+    .map((m) => JSON.parse(m[1] as string))
+    .find((p) => p.type === "message_delta");
+  check(
+    "a repeated stream reads its history back",
+    againDelta?.usage?.cache_read_input_tokens === u.cache_creation_input_tokens,
+    JSON.stringify(againDelta?.usage),
+  );
 } catch (error) {
   check("sse stream contract", false, error instanceof Error ? error.message : String(error));
 } finally {

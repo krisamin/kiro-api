@@ -78,7 +78,12 @@ export type MessagesRequest = {
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop_sequence";
 
-export type AnthropicUsage = { input_tokens: number; output_tokens: number };
+export type AnthropicUsage = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+};
 
 export type MessagesResponse = {
   id: string;

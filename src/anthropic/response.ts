@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { type CachePlan, settleCache } from "../kiro/cache.ts";
 import { measuredPromptToken } from "../kiro/fit.ts";
 import { refusalOf } from "../kiro/refusal.ts";
 import { splitThinking as splitThinkingText } from "../kiro/thinking.ts";
@@ -59,6 +60,24 @@ export const estimateTokens = (text: string): number => Math.max(1, Math.ceil(te
 export const promptFromContext = (percent: number, outputToken: number): number | undefined => {
   const total = measuredPromptToken(percent);
   return total === undefined ? undefined : Math.max(1, total - outputToken);
+};
+
+/**
+ * The usage block, with the prompt split into fresh, cache-written and
+ * cache-read parts when the request's cache plan is known (kiro/cache.ts).
+ *
+ * `input_tokens` is the fresh part only, as the Messages API reports it, so a
+ * client adds the three to get the prompt - the same total as before.
+ */
+export const usageOf = (prompt: number, output: number, plan?: CachePlan): AnthropicUsage => {
+  if (!plan) return { input_tokens: prompt, output_tokens: output };
+  const split = settleCache(plan, prompt);
+  return {
+    input_tokens: split.fresh,
+    cache_creation_input_tokens: split.write,
+    cache_read_input_tokens: split.read,
+    output_tokens: output,
+  };
 };
 
 export class ResponseBuilder {
@@ -179,12 +198,13 @@ export class ResponseBuilder {
     return out;
   }
 
-  usage(promptToken: number): AnthropicUsage {
+  usage(promptToken: number, plan?: CachePlan): AnthropicUsage {
     const output = estimateTokens(this.text) + Math.ceil(this.reasoningChars / 4) + this.tools.size * 8;
-    return { input_tokens: promptFromContext(this.contextPercent, output) ?? promptToken, output_tokens: output };
+    const prompt = promptFromContext(this.contextPercent, output) ?? promptToken;
+    return usageOf(prompt, output, plan);
   }
 
-  response(model: string, promptToken: number): MessagesResponse {
+  response(model: string, promptToken: number, plan?: CachePlan): MessagesResponse {
     return {
       id: messageId(),
       type: "message",
@@ -193,7 +213,7 @@ export class ResponseBuilder {
       content: this.blocks(),
       stop_reason: mapStopReason(this.stopReason, this.sawToolUse),
       stop_sequence: null,
-      usage: this.usage(promptToken),
+      usage: this.usage(promptToken, plan),
     };
   }
 }

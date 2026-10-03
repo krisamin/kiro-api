@@ -1,11 +1,12 @@
 import { PING_INTERVAL_MS } from "../core/config.ts";
 import { log } from "../core/log.ts";
+import { planOf } from "../kiro/cache.ts";
 import { KiroApiError } from "../kiro/client.ts";
 import { invokeFitted, overflowed, overflowMessage } from "../kiro/fit.ts";
 import { dumpEmpty, refusalOf } from "../kiro/refusal.ts";
 import { type ThinkingPiece, ThinkingSplitter } from "../kiro/thinking.ts";
 import type { KiroPayload } from "../kiro/type.ts";
-import { estimateTokens, mapStopReason, messageId, promptFromContext } from "./response.ts";
+import { estimateTokens, mapStopReason, messageId, promptFromContext, usageOf } from "./response.ts";
 
 /**
  * Anthropic SSE streaming.
@@ -62,6 +63,7 @@ export const streamResponse = (
       let chunkCount = 0;
       let thoughtChars = 0;
       let contextPercent = 0;
+      let credits = 0;
       let refusal: string | undefined;
 
       const closeOpen = (): void => {
@@ -210,6 +212,11 @@ export const streamResponse = (
             continue;
           }
 
+          if (event.type === "metering") {
+            credits += event.data.usage ?? 0;
+            continue;
+          }
+
           if (event.type === "metadata") refusal = refusalOf(event.data) ?? refusal;
 
           if (event.type === "metadata" && event.data.stopReason) {
@@ -229,22 +236,28 @@ export const streamResponse = (
         }
 
         const outputTokens = estimateTokens(outputText) + Math.ceil(thoughtChars / 4) + toolIds.size * 8;
+        // The prompt as the service counted it, replacing the estimate
+        // message_start had to give before anything was known, split by what
+        // the service's cache held (kiro/cache.ts). Planned from the payload
+        // as finally sent: a refit trims it in place.
+        const usage = usageOf(
+          promptFromContext(contextPercent, outputTokens) ?? promptToken,
+          outputTokens,
+          planOf(payload),
+        );
         controller.enqueue(
           sse("message_delta", {
             type: "message_delta",
             delta: { stop_reason: mapStopReason(stopReason, sawToolUse), stop_sequence: null },
-            // The prompt as the service counted it, replacing the estimate
-            // message_start had to give before anything was known.
-            usage: {
-              input_tokens: promptFromContext(contextPercent, outputTokens) ?? promptToken,
-              output_tokens: outputTokens,
-            },
+            usage,
           }),
         );
         controller.enqueue(sse("message_stop", { type: "message_stop" }));
         log.info(
           `stream completed model=${model} ttfb=${Math.round(firstTextAt ? firstTextAt - startedAt : -1)}ms ` +
-            `total=${Math.round(performance.now() - startedAt)}ms chunks=${chunkCount} thought=${thoughtChars}`,
+            `total=${Math.round(performance.now() - startedAt)}ms chunks=${chunkCount} thought=${thoughtChars} ` +
+            `credits=${credits.toFixed(4)} prompt=${usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)} ` +
+            `read=${usage.cache_read_input_tokens ?? 0} write=${usage.cache_creation_input_tokens ?? 0}`,
         );
       } catch (error) {
         const message = overflowed(error)
